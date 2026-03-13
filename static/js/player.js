@@ -373,38 +373,12 @@ function showGamePanel() {
     syncMessageHistory(true);
 }
 
-// 角色图片格式优先级列表
-const ROLE_IMAGE_EXTENSIONS = ['png', 'webp', 'jpg', 'jpeg', 'svg'];
+const ROLE_IMAGE_EXTENSIONS = [];
 
-// 尝试加载角色图片，支持多种格式自动尝试，失败时回退到 emoji
 function loadRoleImage(imgElement, emojiElement, roleId, fallbackEmoji) {
-    if (!roleId) {
-        imgElement.style.display = 'none';
-        emojiElement.style.display = '';
-        emojiElement.textContent = fallbackEmoji || '❓';
-        return;
-    }
-    
-    let extIndex = 0;
-    
-    function tryNextFormat() {
-        if (extIndex >= ROLE_IMAGE_EXTENSIONS.length) {
-            imgElement.style.display = 'none';
-            emojiElement.style.display = '';
-            emojiElement.textContent = fallbackEmoji || '👤';
-            return;
-        }
-        const ext = ROLE_IMAGE_EXTENSIONS[extIndex];
-        extIndex++;
-        imgElement.src = `/static/images/roles/${roleId}.${ext}`;
-    }
-    
-    imgElement.onload = function() {
-        imgElement.style.display = '';
-        emojiElement.style.display = 'none';
-    };
-    imgElement.onerror = tryNextFormat;
-    tryNextFormat();
+    imgElement.style.display = 'none';
+    emojiElement.style.display = '';
+    emojiElement.textContent = fallbackEmoji || roleIcons[roleId] || '👤';
 }
 
 const roleIcons = {
