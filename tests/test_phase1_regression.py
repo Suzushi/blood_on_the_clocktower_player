@@ -1,4 +1,5 @@
 import unittest
+import time
 from unittest.mock import patch
 
 from main import app, games
@@ -13,6 +14,20 @@ class TestPhase1Regression(unittest.TestCase):
         create_resp = self.client.post(
             "/api/game/create",
             json={"script_id": "trouble_brewing", "player_count": player_count},
+        )
+        self.assertEqual(create_resp.status_code, 200)
+        game_id = create_resp.get_json()["game_id"]
+        assign_resp = self.client.post(
+            f"/api/game/{game_id}/assign_manual",
+            json={"assignments": assignments},
+        )
+        self.assertEqual(assign_resp.status_code, 200)
+        return game_id
+
+    def _create_bmr_game_with_manual_roles(self, assignments, player_count=5):
+        create_resp = self.client.post(
+            "/api/game/create",
+            json={"script_id": "bad_moon_rising", "player_count": player_count},
         )
         self.assertEqual(create_resp.status_code, 200)
         game_id = create_resp.get_json()["game_id"]
@@ -392,6 +407,363 @@ class TestPhase1Regression(unittest.TestCase):
         nominate_data = nominate_resp.get_json()
         self.assertTrue(nominate_data.get("virgin_triggered"))
         self.assertFalse(next(p for p in game.players if p["id"] == 1).get("alive"))
+
+    def test_bmr_exorcist_cannot_choose_same_target_twice_in_row(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "exorcist"},
+                {"name": "2号", "role_id": "zombuul"},
+                {"name": "3号", "role_id": "innkeeper"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        game.exorcist_previous_targets = [2]
+        resp = self.client.post(
+            "/api/player/night_action",
+            json={
+                "game_id": game_id,
+                "player_id": 1,
+                "targets": [2],
+                "action_type": "exorcist",
+                "extra_data": {},
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("不能连续两晚选择同一名玩家", (resp.get_json() or {}).get("error", ""))
+
+    def test_bmr_devils_advocate_cannot_choose_same_target_twice_in_row(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "devils_advocate"},
+                {"name": "2号", "role_id": "zombuul"},
+                {"name": "3号", "role_id": "innkeeper"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        game.devils_advocate_previous_targets = [2]
+        resp = self.client.post(
+            "/api/player/night_action",
+            json={
+                "game_id": game_id,
+                "player_id": 1,
+                "targets": [2],
+                "action_type": "devils_advocate",
+                "extra_data": {},
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("不能连续两晚选择同一名玩家", (resp.get_json() or {}).get("error", ""))
+
+    def test_bmr_assassin_kill_ignores_protection(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "assassin"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_night")
+        target = next(p for p in game.players if p["id"] == 1)
+        target["protected"] = True
+        game.protected_players.append(1)
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 1, "action": "刺客击杀", "target": 1, "action_type": "assassin_kill"},
+        )
+        start_day_resp = self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertEqual(start_day_resp.status_code, 200)
+        day_data = start_day_resp.get_json()
+        self.assertTrue(any(d.get("cause") == "刺客击杀" and d.get("player_id") == 1 for d in day_data.get("night_deaths", [])))
+        self.assertFalse(next(p for p in game.players if p["id"] == 1).get("alive"))
+
+    def test_bmr_grandmother_dies_when_demon_kills_grandchild(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "grandmother"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        grandmother = next(p for p in game.players if p["id"] == 1)
+        grandchild = next(p for p in game.players if p["id"] == 2)
+        grandmother["grandchild_id"] = 2
+        grandchild["grandchild_of"] = 1
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 3, "action": "僵怖击杀", "target": 2, "action_type": "zombuul_kill"},
+        )
+        start_day_resp = self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertEqual(start_day_resp.status_code, 200)
+        day_data = start_day_resp.get_json()
+        self.assertTrue(any(d.get("player_id") == 2 for d in day_data.get("night_deaths", [])))
+        self.assertTrue(any(d.get("cause") == "祖母殉孙" and d.get("player_id") == 1 for d in day_data.get("night_deaths", [])))
+
+    def test_bmr_gambler_wrong_guess_should_die_at_night(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "gambler"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "goon"},
+                {"name": "5号", "role_id": "exorcist"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={
+                "player_id": 1,
+                "action": "赌徒猜测",
+                "target": 2,
+                "action_type": "gambler_guess",
+                "extra_data": {"guessed_role_id": "zombuul"},
+            },
+        )
+        start_day_resp = self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertEqual(start_day_resp.status_code, 200)
+        day_data = start_day_resp.get_json()
+        self.assertTrue(any(d.get("player_id") == 1 and d.get("cause") == "赌徒猜错" for d in day_data.get("night_deaths", [])))
+        self.assertFalse(next(p for p in game.players if p["id"] == 1).get("alive"))
+
+    def test_bmr_gossip_kill_should_respect_protection(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "gossip"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "goon"},
+                {"name": "5号", "role_id": "exorcist"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_night")
+        protected_target = next(p for p in game.players if p["id"] == 4)
+        protected_target["protected"] = True
+        game.protected_players.append(4)
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 1, "action": "造谣者触发", "target": 4, "action_type": "gossip_kill"},
+        )
+        start_day_resp = self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertEqual(start_day_resp.status_code, 200)
+        day_data = start_day_resp.get_json()
+        self.assertFalse(any(d.get("player_id") == 4 for d in day_data.get("night_deaths", [])))
+        self.assertTrue(next(p for p in game.players if p["id"] == 4).get("alive"))
+
+    def test_bmr_mastermind_should_trigger_after_demon_execution(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "mastermind"},
+                {"name": "2号", "role_id": "po"},
+                {"name": "3号", "role_id": "innkeeper"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp = self.client.post(
+            f"/api/game/{game_id}/nominate",
+            json={"nominator_id": 3, "nominee_id": 2},
+        )
+        nomination_id = nominate_resp.get_json().get("nomination", {}).get("id")
+        for voter_id in [1, 3, 4]:
+            self.client.post(
+                f"/api/game/{game_id}/vote",
+                json={"nomination_id": nomination_id, "voter_id": voter_id, "vote": True},
+            )
+        execute_resp = self.client.post(
+            f"/api/game/{game_id}/execute",
+            json={"nomination_id": nomination_id},
+        )
+        self.assertEqual(execute_resp.status_code, 200)
+        data = execute_resp.get_json()
+        self.assertTrue(data.get("mastermind_triggered"))
+        self.assertFalse(data.get("game_end", {}).get("ended"))
+        self.assertTrue(game.mastermind_pending)
+        self.assertEqual(game.mastermind_resolution_day, game.day_number + 1)
+
+    def test_bmr_mastermind_resolution_day_execution_should_flip_loser_team(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "mastermind"},
+                {"name": "2号", "role_id": "po"},
+                {"name": "3号", "role_id": "innkeeper"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp = self.client.post(
+            f"/api/game/{game_id}/nominate",
+            json={"nominator_id": 3, "nominee_id": 2},
+        )
+        nomination_id = nominate_resp.get_json().get("nomination", {}).get("id")
+        for voter_id in [1, 3, 4]:
+            self.client.post(
+                f"/api/game/{game_id}/vote",
+                json={"nomination_id": nomination_id, "voter_id": voter_id, "vote": True},
+            )
+        self.client.post(f"/api/game/{game_id}/execute", json={"nomination_id": nomination_id})
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp2 = self.client.post(
+            f"/api/game/{game_id}/nominate",
+            json={"nominator_id": 4, "nominee_id": 3},
+        )
+        nomination_id2 = nominate_resp2.get_json().get("nomination", {}).get("id")
+        for voter_id in [1, 4, 5]:
+            self.client.post(
+                f"/api/game/{game_id}/vote",
+                json={"nomination_id": nomination_id2, "voter_id": voter_id, "vote": True},
+            )
+        execute_resp2 = self.client.post(
+            f"/api/game/{game_id}/execute",
+            json={"nomination_id": nomination_id2},
+        )
+        self.assertEqual(execute_resp2.status_code, 200)
+        end_data = execute_resp2.get_json().get("game_end", {})
+        self.assertTrue(end_data.get("ended"))
+        self.assertEqual(end_data.get("winner"), "evil")
+
+    def test_bmr_mastermind_resolution_day_without_execution_should_good_win(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "mastermind"},
+                {"name": "2号", "role_id": "po"},
+                {"name": "3号", "role_id": "innkeeper"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp = self.client.post(
+            f"/api/game/{game_id}/nominate",
+            json={"nominator_id": 3, "nominee_id": 2},
+        )
+        nomination_id = nominate_resp.get_json().get("nomination", {}).get("id")
+        for voter_id in [1, 3, 4]:
+            self.client.post(
+                f"/api/game/{game_id}/vote",
+                json={"nomination_id": nomination_id, "voter_id": voter_id, "vote": True},
+            )
+        self.client.post(f"/api/game/{game_id}/execute", json={"nomination_id": nomination_id})
+        self.assertTrue(game.mastermind_pending)
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(f"/api/game/{game_id}/start_day")
+        start_night_resp = self.client.post(f"/api/game/{game_id}/start_night")
+        self.assertEqual(start_night_resp.status_code, 200)
+        end_data = start_night_resp.get_json().get("game_end", {})
+        self.assertTrue(end_data.get("ended"))
+        self.assertEqual(end_data.get("winner"), "good")
+
+    def test_bmr_minstrel_should_make_others_drunk_until_next_dusk(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "minstrel"},
+                {"name": "2号", "role_id": "devils_advocate"},
+                {"name": "3号", "role_id": "po"},
+                {"name": "4号", "role_id": "innkeeper"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp = self.client.post(
+            f"/api/game/{game_id}/nominate",
+            json={"nominator_id": 4, "nominee_id": 2},
+        )
+        nomination_id = nominate_resp.get_json().get("nomination", {}).get("id")
+        for voter_id in [1, 3, 4]:
+            self.client.post(
+                f"/api/game/{game_id}/vote",
+                json={"nomination_id": nomination_id, "voter_id": voter_id, "vote": True},
+            )
+        execute_resp = self.client.post(
+            f"/api/game/{game_id}/execute",
+            json={"nomination_id": nomination_id},
+        )
+        self.assertEqual(execute_resp.status_code, 200)
+        self.assertEqual(game.minstrel_effect_until_day, game.day_number + 1)
+        minstrel = next(p for p in game.players if p["id"] == 1)
+        innkeeper = next(p for p in game.players if p["id"] == 4)
+        self.assertTrue(game._is_ability_active(minstrel, "测试"))
+        self.assertFalse(game._is_ability_active(innkeeper, "测试"))
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertIsNotNone(game.minstrel_effect_until_day)
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.assertIsNone(game.minstrel_effect_until_day)
+
+    def test_owner_end_day_when_already_night_should_be_idempotent_success(self):
+        game_id = self._create_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "chef"},
+                {"name": "2号", "role_id": "washerwoman"},
+                {"name": "3号", "role_id": "imp"},
+                {"name": "4号", "role_id": "poisoner"},
+                {"name": "5号", "role_id": "soldier"},
+            ]
+        )
+        game = games[game_id]
+        game.owner_token = "owner_test_token"
+        game.current_phase = "night"
+        resp = self.client.post(
+            "/api/player/end_day",
+            json={"game_id": game_id, "owner_token": "owner_test_token"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertTrue(data.get("already_transitioned"))
+        self.assertEqual(data.get("current_phase"), "night")
+
+    def test_owner_end_day_should_finalize_expired_vote_before_settlement(self):
+        game_id = self._create_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "chef"},
+                {"name": "2号", "role_id": "washerwoman"},
+                {"name": "3号", "role_id": "imp"},
+                {"name": "4号", "role_id": "poisoner"},
+                {"name": "5号", "role_id": "soldier"},
+            ]
+        )
+        game = games[game_id]
+        game.owner_token = "owner_test_token"
+        self.client.post(f"/api/game/{game_id}/start_day")
+        nominate_resp = self.client.post(
+            "/api/player/nominate",
+            json={"game_id": game_id, "nominator_id": 4, "nominee_id": 1},
+        )
+        self.assertEqual(nominate_resp.status_code, 200)
+        nomination = game.nominations[-1]
+        nomination["vote_count"] = 3
+        nomination["vote_deadline_at"] = time.time() - 1
+        resp = self.client.post(
+            "/api/player/end_day",
+            json={"game_id": game_id, "owner_token": "owner_test_token"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertTrue(data.get("success"))
+        self.assertEqual(game.current_phase, "night")
+        executed_player = next(p for p in game.players if p["id"] == 1)
+        self.assertFalse(executed_player.get("alive"))
+        self.assertTrue(data.get("execution_result", {}).get("executed"))
 
 
 if __name__ == "__main__":

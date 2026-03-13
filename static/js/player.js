@@ -11,6 +11,7 @@ const playerState = {
     playerName: null,
     role: null,
     roleType: null,
+    displayRoleType: null,
     alive: true,
     players: [],
     currentPhase: 'setup',
@@ -34,7 +35,8 @@ const playerState = {
     ravenkeeperDismissed: false,
     isRoomOwner: false,
     ownerToken: null,
-    reconnectToken: null
+    reconnectToken: null,
+    gameEndedShown: false
 };
 
 // ==================== API 调用 ====================
@@ -56,6 +58,26 @@ async function apiCall(endpoint, method = 'GET', data = null) {
         console.error('API调用失败:', error);
         updateConnectionStatus(false);
         return { error: '网络连接失败' };
+    }
+}
+
+function patchSelectOptions(selectEl, optionsHtml, fallbackValue = '') {
+    if (!selectEl) return;
+    const previousValue = String(selectEl.value || '');
+    if (selectEl.innerHTML !== optionsHtml) {
+        selectEl.innerHTML = optionsHtml;
+    }
+    const hasPrevious = Array.from(selectEl.options).some(opt => String(opt.value) === previousValue);
+    if (hasPrevious) {
+        selectEl.value = previousValue;
+        return;
+    }
+    if (fallbackValue !== null && fallbackValue !== undefined) {
+        const fallback = String(fallbackValue);
+        const hasFallback = Array.from(selectEl.options).some(opt => String(opt.value) === fallback);
+        if (hasFallback) {
+            selectEl.value = fallback;
+        }
     }
 }
 
@@ -288,6 +310,7 @@ async function joinGame() {
     playerState.playerName = result.player_name;
     playerState.role = result.role;
     playerState.roleType = result.role_type;
+    playerState.displayRoleType = result.display_role_type || result.role_type;
     playerState.alive = result.alive;
     playerState.reconnectToken = result.reconnect_token || null;
     
@@ -314,6 +337,7 @@ async function reconnectToGame(gameId, playerId, reconnectToken) {
     playerState.playerName = result.player_name;
     playerState.role = result.role;
     playerState.roleType = result.role_type;
+    playerState.displayRoleType = result.display_role_type || result.role_type;
     playerState.alive = result.alive;
     playerState.currentPhase = result.current_phase;
     playerState.dayNumber = result.day_number;
@@ -402,7 +426,7 @@ const roleIcons = {
 
 function updateRoleCard() {
     const role = playerState.role;
-    const roleType = playerState.roleType;
+    const roleType = playerState.displayRoleType || playerState.roleType;
     
     const imgEl = document.getElementById('roleIconImg');
     const emojiEl = document.getElementById('roleIcon');
@@ -492,6 +516,7 @@ async function pollGameState() {
     if (result.my_status?.role) {
         playerState.role = result.my_status.role;
         playerState.roleType = result.my_status.role_type;
+        playerState.displayRoleType = result.my_status.display_role_type || result.my_status.role_type;
         updateRoleCard();
     }
     
@@ -819,20 +844,24 @@ async function endDayByOwner() {
         showInfo('仅房主可以结束白天');
         return;
     }
+    const endDayBtn = document.getElementById('endDayBtn');
+    if (endDayBtn) endDayBtn.disabled = true;
     const result = await apiCall('/api/player/end_day', 'POST', {
         game_id: playerState.gameId,
         owner_token: playerState.ownerToken
     });
     if (result.error) {
+        await pollGameState();
         showInfo(result.error);
         return;
     }
+    await pollGameState();
     if (result.game_end?.ended) {
-        showGameEnd(result.game_end);
         return;
     }
-    showToast('🌙 已进入夜晚');
-    await pollGameState();
+    if (result.started_night || result.already_transitioned || playerState.currentPhase === 'night') {
+        showToast('🌙 已进入夜晚');
+    }
 }
 
 function updatePlayerCircle() {
@@ -913,15 +942,16 @@ function updateNominationPanel() {
     const allPlayers = playerState.players.filter(p => !nominatedIds.has(p.id));
     const canNominate = playerState.alive && !playerState.activeNomination && !nominatedByMe && allPlayers.length > 0;
 
-    nominatorSelect.innerHTML = alivePlayers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    if (playerState.playerId) {
-        nominatorSelect.value = String(playerState.playerId);
-    }
+    const nominatorOptionsHtml = alivePlayers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    const defaultNominator = playerState.playerId || alivePlayers[0]?.id || '';
+    patchSelectOptions(nominatorSelect, nominatorOptionsHtml, defaultNominator);
 
-    nomineeSelect.innerHTML = allPlayers.map(p => `<option value="${p.id}">${p.name}${p.alive ? '' : ' (已死亡)'}</option>`).join('');
+    const nomineeOptionsHtml = allPlayers.map(p => `<option value="${p.id}">${p.name}${p.alive ? '' : ' (已死亡)'}</option>`).join('');
     if (allPlayers.length > 0) {
         const defaultNominee = allPlayers.find(p => p.id !== playerState.playerId) || allPlayers[0];
-        nomineeSelect.value = String(defaultNominee.id);
+        patchSelectOptions(nomineeSelect, nomineeOptionsHtml, defaultNominee.id);
+    } else if (nomineeSelect.innerHTML !== nomineeOptionsHtml) {
+        nomineeSelect.innerHTML = nomineeOptionsHtml;
     }
 
     const voteState = playerState.dayVoteState || {};
@@ -997,7 +1027,12 @@ function updatePublicSlayerPanel() {
     }
     panel.style.display = 'block';
     const targets = playerState.players.filter(p => p.alive && p.id !== playerState.playerId);
-    targetSelect.innerHTML = targets.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    const targetOptionsHtml = targets.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    if (targets.length > 0) {
+        patchSelectOptions(targetSelect, targetOptionsHtml, targets[0].id);
+    } else if (targetSelect.innerHTML !== targetOptionsHtml) {
+        targetSelect.innerHTML = targetOptionsHtml;
+    }
     const nightCanUse = playerState.currentPhase === 'night' ? playerState.myTurn : true;
     btn.disabled = !playerState.alive || targets.length === 0 || !nightCanUse;
 
@@ -1820,23 +1855,28 @@ function hideNightPanels() {
 
 // ==================== 游戏结束 ====================
 function showGameEnd(gameEnd) {
+    if (playerState.gameEndedShown) {
+        return;
+    }
+    playerState.gameEndedShown = true;
     stopPolling();
     
     const isGood = playerState.roleType === 'townsfolk' || playerState.roleType === 'outsider';
     const won = (isGood && gameEnd.winner === 'good') || (!isGood && gameEnd.winner === 'evil');
-    
-    showInfo(`
-        <div style="text-align: center;">
-            <div style="font-size: 4rem; margin-bottom: 1rem;">${won ? '🎉' : '😢'}</div>
-            <h2 style="color: ${won ? 'var(--color-alive)' : 'var(--color-dead)'}; margin-bottom: 1rem;">
-                ${won ? '胜利！' : '失败...'}
-            </h2>
-            <p style="font-size: 1.2rem; margin-bottom: 0.5rem;">
-                ${gameEnd.winner === 'good' ? '善良阵营' : '邪恶阵营'} 获胜
-            </p>
-            <p style="color: var(--text-muted);">${gameEnd.reason}</p>
-        </div>
-    `, '游戏结束');
+    const titleEl = document.getElementById('gameEndTitle');
+    const winnerEl = document.getElementById('gameEndWinner');
+    const resultEl = document.getElementById('gameEndResult');
+    const reasonEl = document.getElementById('gameEndReason');
+    if (titleEl && winnerEl && resultEl && reasonEl) {
+        titleEl.textContent = won ? '🎉 你赢了' : '💀 你输了';
+        winnerEl.textContent = gameEnd.winner === 'good' ? '善良阵营获胜' : '邪恶阵营获胜';
+        resultEl.textContent = won ? '本局结算：胜利' : '本局结算：失败';
+        resultEl.style.color = won ? 'var(--color-alive)' : 'var(--color-dead)';
+        reasonEl.textContent = gameEnd.reason || '';
+        openModal('gameEndModal');
+    } else {
+        showInfo(`${gameEnd.winner === 'good' ? '善良阵营' : '邪恶阵营'} 获胜<br>${gameEnd.reason || ''}`, '游戏结束');
+    }
     
     localStorage.removeItem('playerState');
 }

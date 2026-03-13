@@ -56,14 +56,14 @@ class Game:
         self.game_log = []
         self.created_at = datetime.now().isoformat()
         # 更新日期: 2026-01-05 - 驱魔人追踪
-        self.exorcist_previous_targets = []  # 驱魔人之前选过的目标
+        self.exorcist_previous_targets = []  # 驱魔人上一晚目标
         self.demon_exorcised_tonight = False  # 恶魔今晚是否被驱魔
         # 更新日期: 2026-01-05 - 僵怖、沙巴洛斯、珀追踪
         self.zombuul_first_death = False  # 僵怖是否已经"假死"过
         self.po_skipped_last_night = False  # 珀上一晚是否跳过了行动
         self.shabaloth_revive_available = False  # 沙巴洛斯是否可以复活
         # 更新日期: 2026-01-09 - 恶魔代言人追踪
-        self.devils_advocate_previous_targets = []  # 恶魔代言人之前选过的目标
+        self.devils_advocate_previous_targets = []  # 恶魔代言人上一晚目标
         self.devils_advocate_protected = None  # 今天被恶魔代言人保护的玩家ID
         # 更新日期: 2026-01-09 - 弄臣、月之子、莽夫追踪
         self.goon_chosen_tonight = False  # 莽夫今晚是否已被选择
@@ -71,6 +71,10 @@ class Game:
         self.day_leading_nomination_id = None
         self.day_leading_vote_count = 0
         self.day_tied = False
+        self.minstrel_effect_until_day = None
+        self.mastermind_pending = False
+        self.mastermind_resolution_day = None
+        self.mastermind_forced_winner = None
         
     def to_dict(self):
         return {
@@ -87,7 +91,10 @@ class Game:
             "votes": self.votes,
             "executions": self.executions,
             "night_deaths": self.night_deaths,
-            "game_log": self.game_log
+            "game_log": self.game_log,
+            "minstrel_effect_until_day": self.minstrel_effect_until_day,
+            "mastermind_pending": self.mastermind_pending,
+            "mastermind_resolution_day": self.mastermind_resolution_day
         }
     
     def add_log(self, message, log_type="info"):
@@ -334,6 +341,9 @@ class Game:
     def start_night(self):
         """开始夜晚"""
         self.reconcile_player_role_types("夜晚开始")
+        if self.minstrel_effect_until_day is not None and self.day_number >= self.minstrel_effect_until_day:
+            self.minstrel_effect_until_day = None
+            self.add_log("🎻 吟游诗人的全场醉酒效果已结束", "status")
         self.night_number += 1
         self.current_phase = "night"
         self.night_deaths = []
@@ -447,7 +457,7 @@ class Game:
             "time": datetime.now().strftime("%H:%M:%S")
         })
 
-        if player and action_type in {"kill", "zombuul_kill", "shabaloth_kill", "po_kill", "poison", "protect", "pukka_poison", "drunk", "sailor_drunk", "ability_select", "exorcist", "devils_advocate", "pit_hag", "butler_master", "grandchild_select"}:
+        if player and action_type in {"kill", "assassin_kill", "gossip_kill", "zombuul_kill", "shabaloth_kill", "po_kill", "poison", "protect", "pukka_poison", "drunk", "sailor_drunk", "gambler_guess", "ability_select", "exorcist", "devils_advocate", "pit_hag", "butler_master", "grandchild_select"}:
             if not self._is_ability_active(player, f"夜间行动:{action_type}"):
                 self.night_actions[-1]["result"] = "能力失效"
                 self.add_log(f"[夜间] {player['name']} 因醉酒/中毒导致技能失效", "night")
@@ -502,11 +512,9 @@ class Game:
         
         # 处理击杀类行动（恶魔）
         # 更新日期: 2026-01-05 - 添加驱魔人阻止恶魔行动逻辑
-        elif action_type == "kill" and target:
-            # 检查恶魔是否被驱魔人阻止
-            if getattr(self, 'demon_exorcised_tonight', False):
+        elif action_type in {"kill", "assassin_kill"} and target:
+            if action_type == "kill" and getattr(self, 'demon_exorcised_tonight', False):
                 self.add_log(f"[夜间] {player['name']} 被驱魔人阻止，无法击杀", "night")
-                # 小恶魔传刀仍然可以生效（自杀不受驱魔影响）
                 if player and player.get("role", {}).get("id") == "imp" and target == player_id:
                     self.process_imp_suicide(player_id)
             else:
@@ -516,16 +524,28 @@ class Game:
                     "killer_id": player_id,
                     "target_id": target,
                     "killer_name": player['name'] if player else '未知',
-                    "target_name": target_player['name'] if target_player else '未知'
+                    "target_name": target_player['name'] if target_player else '未知',
+                    "kill_type": "assassin" if action_type == "assassin_kill" else "demon",
+                    "ignore_protection": action_type == "assassin_kill"
                 })
                 self.add_log(f"[夜间] {player['name']} 选择击杀 {target_player['name'] if target_player else '未知'}", "night")
-                
-                # 立即检查目标是否是守鸦人
                 self.check_and_trigger_ravenkeeper(target)
-                
-                # 小恶魔传刀逻辑：如果小恶魔选择自杀
                 if player and player.get("role", {}).get("id") == "imp" and target == player_id:
                     self.process_imp_suicide(player_id)
+
+        elif action_type == "gossip_kill" and target:
+            if not hasattr(self, 'demon_kills'):
+                self.demon_kills = []
+            self.demon_kills.append({
+                "killer_id": player_id,
+                "target_id": target,
+                "killer_name": player['name'] if player else '未知',
+                "target_name": target_player['name'] if target_player else '未知',
+                "kill_type": "gossip",
+                "ignore_protection": False
+            })
+            self.add_log(f"[夜间] {player['name']} (造谣者) 触发死亡：{target_player['name'] if target_player else '未知'}", "night")
+            self.check_and_trigger_ravenkeeper(target)
         
         # 更新日期: 2026-01-05 - 僵怖击杀（如果今天没人因其能力死亡才能杀人）
         elif action_type == "zombuul_kill":
@@ -711,6 +731,24 @@ class Game:
                 }
                 drunk_name = drunk_player['name']
                 self.add_log(f"[夜间] {player['name']} (水手) 选择了 {target_player['name']}，{drunk_name} 喝醉了", "night")
+
+        elif action_type == "gambler_guess" and target:
+            if target_player and player:
+                guessed_role_id = (extra_data or {}).get("guessed_role_id")
+                actual_role = self._get_player_actual_role(target_player)
+                actual_role_id = (actual_role or {}).get("id")
+                guessed_role_name = (self._find_role_by_id(guessed_role_id) or {}).get("name", guessed_role_id or "未知")
+                actual_role_name = (actual_role or {}).get("name", "未知")
+                if guessed_role_id and guessed_role_id == actual_role_id:
+                    self.add_log(f"[夜间] {player['name']} (赌徒) 猜测 {target_player['name']} 是 {guessed_role_name}，猜对了", "night")
+                else:
+                    if not any(d.get("player_id") == player_id and d.get("cause") == "赌徒猜错" for d in self.night_deaths):
+                        self.night_deaths.append({
+                            "player_id": player_id,
+                            "player_name": player["name"],
+                            "cause": "赌徒猜错"
+                        })
+                    self.add_log(f"[夜间] {player['name']} (赌徒) 猜测 {target_player['name']} 是 {guessed_role_name}，实际为 {actual_role_name}，赌徒死亡", "night")
         
         # 处理祖母选择孙子
         elif action_type == "grandchild_select" and target:
@@ -735,8 +773,7 @@ class Game:
                 if not hasattr(self, 'exorcist_previous_targets'):
                     self.exorcist_previous_targets = []
                 
-                # 将目标添加到之前选过的列表
-                self.exorcist_previous_targets.append(target)
+                self.exorcist_previous_targets = [target]
                 
                 # 检查驱魔人是否醉酒/中毒
                 is_affected = player.get("drunk") or player.get("poisoned")
@@ -758,8 +795,7 @@ class Game:
                 if not hasattr(self, 'devils_advocate_previous_targets'):
                     self.devils_advocate_previous_targets = []
                 
-                # 将目标添加到之前选过的列表
-                self.devils_advocate_previous_targets.append(target)
+                self.devils_advocate_previous_targets = [target]
                 
                 # 检查恶魔代言人是否醉酒/中毒
                 is_affected = player.get("drunk") or player.get("poisoned")
@@ -951,6 +987,37 @@ class Game:
                 continue
             if not target_player.get("alive", True):
                 continue
+            force_death = bool(kill.get("ignore_protection"))
+            killer_player = next((p for p in self.players if p["id"] == kill.get("killer_id")), None)
+            killer_is_demon = bool(killer_player and killer_player.get("role_type") == "demon")
+            kill_type = kill.get("kill_type")
+            if kill_type == "assassin":
+                death_cause = "刺客击杀"
+            elif kill_type == "gossip":
+                death_cause = "造谣者触发"
+            else:
+                death_cause = "恶魔击杀"
+            if force_death:
+                actual_deaths.append({
+                    "player_id": target_id,
+                    "player_name": target_player["name"],
+                    "cause": death_cause
+                })
+                if target_player.get("role") and target_player["role"].get("id") == "ravenkeeper":
+                    if not target_player.get("poisoned") and not target_player.get("drunk"):
+                        target_player["ravenkeeper_triggered"] = True
+                        self.add_log(f"守鸦人 {target_player['name']} 在夜间死亡，需要唤醒选择一名玩家", "night")
+                if killer_is_demon:
+                    grandmother_id = target_player.get("grandchild_of")
+                    grandmother = next((p for p in self.players if p["id"] == grandmother_id), None) if grandmother_id else None
+                    if grandmother and grandmother.get("alive", True) and self._is_ability_active(grandmother, "被动技能:grandmother"):
+                        actual_deaths.append({
+                            "player_id": grandmother["id"],
+                            "player_name": grandmother["name"],
+                            "cause": "祖母殉孙"
+                        })
+                        self.add_log(f"[夜间] 祖母 {grandmother['name']} 因孙子被恶魔杀死而死亡", "night")
+                continue
             
             # 检查是否被保护
             if target_id in protected:
@@ -1005,7 +1072,7 @@ class Game:
             actual_deaths.append({
                 "player_id": target_id,
                 "player_name": target_player["name"],
-                "cause": "恶魔击杀"
+                "cause": death_cause
             })
             
             # 检查是否是守鸦人（死亡时被唤醒）
@@ -1013,6 +1080,16 @@ class Game:
                 if not target_player.get("poisoned") and not target_player.get("drunk"):
                     target_player["ravenkeeper_triggered"] = True
                     self.add_log(f"守鸦人 {target_player['name']} 在夜间死亡，需要唤醒选择一名玩家", "night")
+            if killer_is_demon:
+                grandmother_id = target_player.get("grandchild_of")
+                grandmother = next((p for p in self.players if p["id"] == grandmother_id), None) if grandmother_id else None
+                if grandmother and grandmother.get("alive", True) and self._is_ability_active(grandmother, "被动技能:grandmother"):
+                    actual_deaths.append({
+                        "player_id": grandmother["id"],
+                        "player_name": grandmother["name"],
+                        "cause": "祖母殉孙"
+                    })
+                    self.add_log(f"[夜间] 祖母 {grandmother['name']} 因孙子被恶魔杀死而死亡", "night")
         
         return actual_deaths
     
@@ -1272,6 +1349,30 @@ class Game:
         required_votes = (alive_count // 2) + 1
         
         if nomination["vote_count"] >= required_votes:
+            if self.mastermind_pending and self.day_number >= (self.mastermind_resolution_day or 10**9):
+                nomination["status"] = "executed"
+                self.executions.append({
+                    "day": self.day_number,
+                    "executed_id": nominee["id"],
+                    "executed_name": nominee["name"],
+                    "vote_count": nomination["vote_count"],
+                    "required_votes": required_votes,
+                    "reason": "mastermind_final_day"
+                })
+                loser_is_evil = self._is_player_evil_for_win(nominee)
+                winner = "good" if loser_is_evil else "evil"
+                self.mastermind_pending = False
+                self.mastermind_resolution_day = None
+                self.mastermind_forced_winner = winner
+                self.add_log(f"🧠 主谋结算：{nominee['name']} 被处决，{winner} 阵营获胜", "game_end")
+                return {
+                    "success": True,
+                    "executed": False,
+                    "player": nominee,
+                    "mastermind_resolution": True,
+                    "game_end": {"ended": True, "winner": winner, "reason": "主谋结算"}
+                }
+
             # 更新日期: 2026-01-05 - 恶魔代言人保护检查
             # 检查被提名者是否被恶魔代言人保护
             if nominee.get("devils_advocate_protected"):
@@ -1327,6 +1428,7 @@ class Game:
             
             # 记录被处决者的角色类型（用于后续检查红唇女郎）
             was_demon = nominee.get("role_type") == "demon"
+            was_minion = nominee.get("role_type") == "minion"
             
             # 更新日期: 2026-01-05 - 僵怖假死逻辑（处决时）
             # 检查是否是僵怖的第一次死亡
@@ -1365,6 +1467,14 @@ class Game:
                 "required_votes": required_votes
             })
             self.add_log(f"{nominee['name']} 被处决 (获得 {nomination['vote_count']}/{required_votes} 票)", "execution")
+            if was_minion:
+                minstrel = next(
+                    (p for p in self.players if p.get("alive", True) and p.get("role", {}).get("id") == "minstrel"),
+                    None
+                )
+                if minstrel and self._is_ability_active(minstrel, "被动技能:minstrel"):
+                    self.minstrel_effect_until_day = self.day_number + 1
+                    self.add_log(f"🎻 吟游诗人 {minstrel['name']} 触发：其他玩家醉酒至第 {self.minstrel_effect_until_day} 天黄昏", "game_event")
             
             # 检查圣徒能力：如果被处决的是圣徒，邪恶阵营获胜
             nominee_role_id = nominee.get("role", {}).get("id") if nominee.get("role") else None
@@ -1401,9 +1511,15 @@ class Game:
             
             if was_demon:
                 game_end = self.check_game_end(apply_scarlet_woman=True)
+                if game_end.get("ended") and game_end.get("winner") == "good":
+                    if self._arm_mastermind():
+                        game_end = self.check_game_end(apply_scarlet_woman=True)
                 if game_end.get("scarlet_woman_triggered"):
                     result["scarlet_woman_triggered"] = True
                     result["new_demon_name"] = game_end.get("new_demon")
+                if game_end.get("mastermind_pending"):
+                    result["mastermind_triggered"] = True
+                    result["mastermind_resolution_day"] = game_end.get("resolution_day")
                 result["game_end"] = game_end
             
             return result
@@ -1500,14 +1616,45 @@ class Game:
             return False
         return self._is_ability_active(mayor, "被动技能:mayor")
 
+    def _is_player_evil_for_win(self, player):
+        if not player:
+            return False
+        role_type = player.get("role_type")
+        if role_type in {"demon", "minion"}:
+            return True
+        if role_type == "traveler":
+            return self._is_evil_traveler(player)
+        alignment = str(player.get("alignment") or player.get("goon_alignment") or "").lower()
+        return alignment in {"evil", "minion", "demon"} or bool(player.get("evil", False))
+
+    def _arm_mastermind(self):
+        if self.mastermind_pending or self.mastermind_forced_winner:
+            return False
+        mastermind = next(
+            (p for p in self.players if p.get("alive", True) and p.get("role", {}).get("id") == "mastermind"),
+            None
+        )
+        if not mastermind:
+            return False
+        if not self._is_ability_active(mastermind, "被动技能:mastermind"):
+            return False
+        self.mastermind_pending = True
+        self.mastermind_resolution_day = self.day_number + 1
+        self.add_log(f"🧠 主谋 {mastermind['name']} 触发：游戏延长到第 {self.mastermind_resolution_day} 天", "game_event")
+        return True
+
     # 更新日期: 2026-01-02 - 添加红唇女郎能力检测
     def check_game_end(self, apply_scarlet_woman=False, allow_mayor_day_end=False):
         """检查游戏是否结束"""
+        if self.mastermind_forced_winner:
+            return {"ended": True, "winner": self.mastermind_forced_winner, "reason": "主谋结算完成"}
         alive_players, alive_non_travelers = self._alive_players_for_win_check()
         demons_alive = [p for p in alive_non_travelers if p.get("role_type") == "demon"]
 
         # 恶魔死亡（优先于邪恶人数胜利，符合同时满足时善良胜）
         if not demons_alive:
+            if self.mastermind_pending:
+                return {"ended": False, "mastermind_pending": True, "resolution_day": self.mastermind_resolution_day}
             if apply_scarlet_woman:
                 scarlet_woman_result = self.check_scarlet_woman_trigger()
                 if scarlet_woman_result["triggered"]:
@@ -1586,6 +1733,10 @@ class Game:
 
     def _is_ability_active(self, player, scene=""):
         if not player:
+            return False
+        player_role_id = (player.get("role") or {}).get("id")
+        if self.minstrel_effect_until_day is not None and self.day_number <= self.minstrel_effect_until_day and player_role_id != "minstrel":
+            self.add_log(f"[系统] {player['name']} 受吟游诗人效果影响，能力失效（{scene or '技能'}）", "info")
             return False
         if player.get("drunk", False):
             self.add_log(f"[系统] {player['name']} 醉酒导致能力失效（{scene or '技能'}）", "info")
@@ -2330,6 +2481,17 @@ def start_night(game_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
+    if getattr(game, "mastermind_pending", False):
+        resolution_day = getattr(game, "mastermind_resolution_day", None)
+        if resolution_day is not None and game.day_number >= resolution_day and not game._had_execution_today():
+            game.mastermind_pending = False
+            game.mastermind_resolution_day = None
+            game.mastermind_forced_winner = "good"
+            game.add_log("🧠 主谋结算：延长日无人被处决，善良阵营获胜", "game_end")
+            return jsonify({
+                "success": True,
+                "game_end": {"ended": True, "winner": "good", "reason": "主谋延长日无人被处决"}
+            })
     game_end_before_night = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
     if game_end_before_night.get("ended"):
         return jsonify({
