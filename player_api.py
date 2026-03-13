@@ -489,6 +489,15 @@ def _end_day_and_start_night(game):
         execution_result = game.execute(leading_id)
         if not execution_result.get("success"):
             return {"success": False, "error": execution_result.get("error", "结算失败")}
+        
+        # 检查处决后游戏是否结束（例如圣徒被处决）
+        if execution_result.get("game_end", {}).get("ended"):
+            return {
+                "success": True, 
+                "execution_result": execution_result, 
+                "game_end": execution_result["game_end"], 
+                "started_night": False
+            }
     else:
         game.add_log("[系统] 白天结束：无人被处决", "execution")
 
@@ -1851,6 +1860,45 @@ def ravenkeeper_choose():
         f"[守鸦人] {player['name']} 查验了 {target['name']}，得知角色为 {role_name}",
         "night"
     )
+
+    # 发送夜间信息给玩家
+    _push_player_message(
+        game,
+        player_id,
+        "night_result",
+        "🌙 守鸦人查验结果",
+        f"{target['name']} 的角色是 {role_name}",
+        result_data
+    )
+
+    # 标记为已提交，让自动夜间循环继续
+    if hasattr(game, 'pending_actions') and player_id in game.pending_actions:
+        game.pending_actions[player_id]["status"] = "submitted"
+        # 构造一个符合 choice 结构的字典
+        game.pending_actions[player_id]["choice"] = {
+            "targets": [target_id],
+            "target_names": [target["name"]],
+            "extra_data": {},
+            "skipped": False,
+            "submitted_at": datetime.now().isoformat()
+        }
+    
+    # 同时也记录到 player_night_choices
+    if not hasattr(game, 'player_night_choices'):
+        game.player_night_choices = {}
+    
+    game.player_night_choices[player_id] = {
+        "player_id": player_id,
+        "player_name": player["name"],
+        "role_id": "ravenkeeper",
+        "role_name": "守鸦人",
+        "targets": [target_id],
+        "target_names": [target["name"]],
+        "extra_data": {},
+        "skipped": False,
+        "submitted_at": datetime.now().isoformat(),
+        "confirmed": False
+    }
 
     return jsonify({
         "success": True,

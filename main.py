@@ -125,8 +125,13 @@ class Game:
         # 首先检查是否会有设置阶段能力的角色（男爵、教父等）
         # 先预选爪牙角色
         minion_roles = available_roles["minion"].copy()
+        # 修复Bug：避免在人少（<7人）的对局分配红唇女郎
+        if len(player_names) < 7:
+            minion_roles = [r for r in minion_roles if r["id"] != "scarlet_woman"]
+        
         random.shuffle(minion_roles)
-        selected_minions = minion_roles[:distribution.get("minion", 0)]
+        minion_count = distribution.get("minion", 0)
+        selected_minions = minion_roles[:minion_count]
         
         # 检查是否有男爵（+2外来者，-2镇民）
         has_baron = any(m["id"] == "baron" for m in selected_minions)
@@ -408,7 +413,17 @@ class Game:
                 
                 # 跳过被动触发的角色（如守鸦人、贤者等 - 只在触发时处理）
                 if role.get("passive_trigger"):
-                    continue
+                    # 检查是否满足特定触发条件（如死亡）
+                    should_include = False
+                    
+                    # 守鸦人/贤者：如果在今晚死亡，则需要触发
+                    if role_id in ["ravenkeeper", "sage"]:
+                        # 检查是否在今晚死亡列表中
+                        if any(d.get("player_id") == player["id"] for d in self.night_deaths):
+                            should_include = True
+                            
+                    if not should_include:
+                        continue
                 
                 # 跳过说书人控制的角色（如修补匠、造谣者等）
                 if role.get("storyteller_controlled"):
@@ -1735,13 +1750,32 @@ class Game:
         if not player:
             return False
         player_role_id = (player.get("role") or {}).get("id")
+        
+        # 某些角色死亡后仍有能力（如僵怖、复仇者等），这里需要特殊处理
+        if not player.get("alive", True):
+            if player_role_id not in ["zombuul", "ravenkeeper", "sage", "moonchild", "barber"]:
+                return False
+                
         if self.minstrel_effect_until_day is not None and self.day_number <= self.minstrel_effect_until_day and player_role_id != "minstrel":
             self.add_log(f"[系统] {player['name']} 受吟游诗人效果影响，能力失效（{scene or '技能'}）", "info")
             return False
         if player.get("drunk", False):
             self.add_log(f"[系统] {player['name']} 醉酒导致能力失效（{scene or '技能'}）", "info")
             return False
-        return not self._roll_poison_failure(player, scene)
+            
+        # 检查是否中毒
+        if player.get("poisoned"):
+            # 中毒判定：POISON_FAILURE_RATE 概率失效（即中毒生效），(1-RATE) 概率正常（即中毒失效）
+            # poison_failed=True 表示"中毒失效" -> 技能正常
+            # poison_failed=False 表示"中毒生效" -> 技能失效
+            poison_failed = self._roll_poison_failure(player, scene)
+            if not poison_failed:
+                # 中毒生效，技能失效
+                return False
+            # 中毒失效，技能正常
+            return True
+            
+        return True
 
     def _spy_registers_as_good_for_info(self, target_player, scene=""):
         if not target_player:
@@ -1981,7 +2015,7 @@ class Game:
         is_poisoned = player.get("poisoned", False)
         is_drunk_or_poisoned = is_drunk or is_poisoned
         poison_failed = self._roll_poison_failure(player, f"信息:{role_id}") if is_poisoned else False
-        info_malfunctioned = is_drunk or poison_failed
+        info_malfunctioned = is_drunk or (is_poisoned and not poison_failed)
         
         # 获取目标玩家
         target_players = []

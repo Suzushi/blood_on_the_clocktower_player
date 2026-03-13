@@ -648,6 +648,7 @@ SCRIPTS = {
 def get_role_distribution(player_count):
     """根据玩家数量返回角色分布"""
     distributions = {
+        4: {"townsfolk": 2, "outsider": 0, "minion": 1, "demon": 1},
         5: {"townsfolk": 3, "outsider": 0, "minion": 1, "demon": 1},
         6: {"townsfolk": 3, "outsider": 1, "minion": 1, "demon": 1},
         7: {"townsfolk": 5, "outsider": 0, "minion": 1, "demon": 1},
