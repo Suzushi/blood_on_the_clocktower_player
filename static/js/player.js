@@ -1182,7 +1182,28 @@ async function forceExecuteActiveNomination() {
         return;
     }
 
-    showToast('本轮投票已结算');
+    if (result.execution_result) {
+        const execRes = result.execution_result;
+        if (execRes.executed && execRes.player) {
+            showToast(`${execRes.player.name} 被处决`);
+        } else if (execRes.protected_by_devils_advocate) {
+            showToast(`🛡️ ${execRes.player.name} 被恶魔代言人保护`);
+        } else if (execRes.fool_saved) {
+            showToast(`🃏 ${execRes.player.name} (弄臣) 首次死亡被避免`);
+        } else if (execRes.pacifist_intervention) {
+            showInfo(`和平主义者 ${execRes.pacifist_name} 可以保护 ${execRes.nominee_name}`);
+        } else {
+            showToast('本轮投票已结算');
+        }
+    } else {
+        showToast('本轮投票已结算');
+    }
+
+    if (result.game_end && result.game_end.ended) {
+        showGameEnd(result.game_end);
+        return;
+    }
+
     await pollGameState();
 }
 

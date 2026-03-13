@@ -1197,7 +1197,7 @@ def player_vote():
 
 @player_bp.route('/api/player/execute_active_nomination', methods=['POST'])
 def execute_active_nomination():
-    """房主强制结束当前投票"""
+    """房主强制结束当前投票并执行处决"""
     data = request.json
     game_id = data.get('game_id')
     owner_token = data.get('owner_token')
@@ -1217,9 +1217,23 @@ def execute_active_nomination():
     if not result.get("success"):
         return jsonify({"error": result.get("error", "结算失败")}), 400
 
+    execution_result = None
+    game_end = None
+
+    if result.get("on_the_block"):
+        leading_id = game.day_leading_nomination_id
+        if leading_id:
+            execution_result = game.execute(leading_id)
+            if execution_result.get("success") and "game_end" not in execution_result:
+                execution_result["game_end"] = game.check_game_end(apply_scarlet_woman=True)
+            if execution_result.get("game_end"):
+                game_end = execution_result["game_end"]
+
     return jsonify({
         "success": True,
-        "result": result
+        "result": result,
+        "execution_result": execution_result,
+        "game_end": game_end
     })
 
 @player_bp.route('/api/player/end_day', methods=['POST'])
