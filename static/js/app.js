@@ -3819,50 +3819,23 @@ function closeMoonchildModal() {
     closeModal('moonchildModal');
 }
 
-// ===== 角色图片加载 =====
-const ROLE_IMG_EXTENSIONS = ['png', 'webp', 'jpg', 'jpeg', 'svg'];
+const ROLE_IMG_EXTENSIONS = [];
 
 function tryLoadRoleImageIntoAvatar(containerEl, roleId, fallbackEmoji) {
-    let extIndex = 0;
-    const img = new Image();
-    
-    function tryNext() {
-        if (extIndex >= ROLE_IMG_EXTENSIONS.length) return;
-        img.src = `/static/images/roles/${roleId}.${ROLE_IMG_EXTENSIONS[extIndex]}`;
-        extIndex++;
-    }
-    
-    img.onload = function() {
-        containerEl.textContent = '';
-        containerEl.appendChild(img);
-    };
-    img.onerror = tryNext;
-    tryNext();
+    containerEl.textContent = fallbackEmoji || '👤';
 }
 
-// 为动态生成的 HTML 提供角色图片 <img> 标签（带 onerror 回退）
 function getRoleImageHTML(roleId, fallbackEmoji, size) {
     size = size || 80;
-    if (!roleId) return `<span style="font-size: ${size * 0.6}px;">${fallbackEmoji || '👤'}</span>`;
-    const fallback = (fallbackEmoji || '👤').replace(/'/g, "\\'");
-    return `<img src="/static/images/roles/${roleId}.png"
-        style="width: ${size}px; height: ${size}px; object-fit: contain;"
-        onerror="this.onerror=null; tryRoleImageFallback(this, '${roleId}', '${fallback}', 1);"
-        alt="${roleId}">`;
+    const emoji = fallbackEmoji || '👤';
+    return `<span style="font-size: ${size * 0.6}px;">${emoji}</span>`;
 }
 
 function tryRoleImageFallback(imgEl, roleId, fallbackEmoji, extIdx) {
-    if (extIdx >= ROLE_IMG_EXTENSIONS.length) {
-        const span = document.createElement('span');
-        span.style.fontSize = imgEl.style.width ? (parseInt(imgEl.style.width) * 0.6) + 'px' : '2.5rem';
-        span.textContent = fallbackEmoji || '👤';
-        imgEl.parentNode.replaceChild(span, imgEl);
-        return;
-    }
-    imgEl.onerror = function() {
-        tryRoleImageFallback(imgEl, roleId, fallbackEmoji, extIdx + 1);
-    };
-    imgEl.src = `/static/images/roles/${roleId}.${ROLE_IMG_EXTENSIONS[extIdx]}`;
+    const span = document.createElement('span');
+    span.style.fontSize = imgEl.style.width ? (parseInt(imgEl.style.width) * 0.6) + 'px' : '2.5rem';
+    span.textContent = fallbackEmoji || '👤';
+    imgEl.parentNode.replaceChild(span, imgEl);
 }
 
 // ===== 玩家详情 =====

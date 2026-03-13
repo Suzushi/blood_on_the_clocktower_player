@@ -862,8 +862,8 @@ def get_night_action_config(role_id, role_type, game, player_id):
     """获取夜间行动配置"""
     alive_players = [p for p in game.players if p.get("alive", True) and p["id"] != player_id]
     all_players = [p for p in game.players if p["id"] != player_id]
+    all_players_with_self = [{"id": p["id"], "name": p["name"]} for p in game.players]
     
-    # 基础配置
     config = {
         "type": "other",
         "role_id": role_id,
@@ -916,7 +916,7 @@ def get_night_action_config(role_id, role_type, game, player_id):
     elif role_id == "fortune_teller":
         config["type"] = "fortune_tell"
         config["can_select"] = True
-        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in all_players]
+        config["targets"] = all_players_with_self
         config["min_targets"] = 2
         config["max_targets"] = 2
         config["description"] = "选择两名玩家查验是否有恶魔"
