@@ -51,6 +51,16 @@ def _is_reconnect_token_valid(player, token):
 def _get_player(game, player_id):
     return next((p for p in game.players if p["id"] == player_id), None)
 
+def _get_player_display_role_type(game, player):
+    if not game or not player:
+        return None
+    role = player.get("role")
+    if not role:
+        return player.get("role_type")
+    if hasattr(game, "_get_role_type"):
+        return game._get_role_type(role)
+    return player.get("role_type")
+
 def _ensure_player_messages(player):
     if "messages" not in player:
         player["messages"] = []
@@ -97,7 +107,7 @@ def _build_auto_action_config(game, player, role, action_type):
         "use_alive_only": True,
         "description": role.get("ability", "")
     }
-    if action_type in ["kill", "poison", "drunk", "sailor_drunk", "grandchild_select", "butler_master", "exorcist", "devils_advocate", "pukka_poison", "zombuul_kill", "ability_select"]:
+    if action_type in ["kill", "assassin_kill", "poison", "drunk", "sailor_drunk", "grandchild_select", "butler_master", "exorcist", "devils_advocate", "pukka_poison", "zombuul_kill", "ability_select", "gambler_guess"]:
         config["can_select"] = True
     elif action_type == "protect":
         config["can_select"] = True
@@ -167,6 +177,14 @@ def _validate_night_action_constraints(game, player, role_id, action_type, targe
             target_player = _get_player(game, tid)
             if not target_player or not target_player.get("alive", True):
                 return False, "管家的主人必须是存活玩家"
+    if role_id == "exorcist" and action_type == "exorcist" and targets:
+        previous_targets = getattr(game, "exorcist_previous_targets", []) or []
+        if previous_targets and previous_targets[-1] == targets[0]:
+            return False, "驱魔人不能连续两晚选择同一名玩家"
+    if role_id == "devils_advocate" and action_type == "devils_advocate" and targets:
+        previous_targets = getattr(game, "devils_advocate_previous_targets", []) or []
+        if previous_targets and previous_targets[-1] == targets[0]:
+            return False, "恶魔代言人不能连续两晚选择同一名玩家"
     return True, ""
 
 def _create_pending_action(game, player, action_type, action_config):
@@ -626,6 +644,7 @@ def player_join_game():
         "player_name": player["name"],
         "role": player.get("role"),
         "role_type": player.get("role_type"),
+        "display_role_type": _get_player_display_role_type(game, player),
         "alive": player.get("alive", True),
         "reconnect_token": reconnect_token,
         "reconnect_token_ttl_seconds": RECONNECT_TOKEN_TTL_SECONDS
@@ -669,6 +688,7 @@ def player_reconnect():
         "player_name": player["name"],
         "role": player.get("role"),
         "role_type": player.get("role_type"),
+        "display_role_type": _get_player_display_role_type(game, player),
         "alive": player.get("alive", True),
         "current_phase": game.current_phase,
         "day_number": game.day_number,
@@ -815,6 +835,7 @@ def get_player_game_state(game_id, player_id):
             "vote_token": player.get("vote_token", True),
             "role": player.get("role"),
             "role_type": player.get("role_type"),
+            "display_role_type": _get_player_display_role_type(game, player),
             "drunk": player.get("drunk", False),
             "poisoned": player.get("poisoned", False)
         },
@@ -845,13 +866,29 @@ def get_night_action_config(role_id, role_type, game, player_id):
         "description": ""
     }
     
-    # 根据角色类型配置
+    is_bmr = getattr(game, "script_id", "") == "bad_moon_rising"
     if role_type == "demon":
         config["type"] = "kill"
         config["can_select"] = True
         config["min_targets"] = 1
         config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
         config["description"] = "选择一名玩家击杀"
+        if is_bmr and role_id == "zombuul":
+            config["type"] = "zombuul_kill"
+            config["min_targets"] = 0
+            config["description"] = "若今天白天无人死亡，可选择一名玩家击杀（可跳过）"
+        elif is_bmr and role_id == "shabaloth":
+            config["type"] = "shabaloth_kill"
+            config["max_targets"] = 2
+            config["description"] = "选择最多两名玩家击杀，可选择复活一名死亡玩家"
+        elif is_bmr and role_id == "po":
+            config["type"] = "po_kill"
+            config["min_targets"] = 0
+            config["max_targets"] = 3
+            config["description"] = "可选择不杀；若上一晚未杀，本晚可选择三名目标"
+        elif is_bmr and role_id == "pukka":
+            config["type"] = "pukka_poison"
+            config["description"] = "选择一名玩家中毒，上一位中毒目标在今晚死亡"
     
     elif role_id == "monk":
         config["type"] = "protect"
@@ -908,6 +945,49 @@ def get_night_action_config(role_id, role_type, game, player_id):
         config["type"] = "info"
         config["can_select"] = False
         config["description"] = "你可以查看魔典（说书人会告知信息）"
+    elif role_id == "grandmother":
+        config["type"] = "grandchild_select"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in all_players]
+        config["description"] = "选择一名玩家作为你的孙子"
+    elif role_id == "sailor":
+        config["type"] = "sailor_drunk"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "选择一名存活玩家，你们其中一人醉酒到明天黄昏"
+    elif role_id == "innkeeper":
+        config["type"] = "protect"
+        config["can_select"] = True
+        config["min_targets"] = 2
+        config["max_targets"] = 2
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "选择两名玩家保护，其中一人会醉酒"
+    elif role_id == "exorcist":
+        config["type"] = "exorcist"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "选择一名玩家；若是恶魔则其今晚无法行动"
+    elif role_id == "devils_advocate":
+        config["type"] = "devils_advocate"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "选择一名存活玩家，若其明天被处决则不会死亡"
+    elif role_id == "assassin":
+        config["type"] = "assassin_kill"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "每局一次，夜晚选择一名玩家：其死亡（无视保护）"
+    elif role_id == "gambler":
+        config["type"] = "gambler_guess"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "选择一名玩家并猜测其角色；若猜错则你死亡"
     
     elif role_id in ["washerwoman", "librarian", "investigator", "chef", "clockmaker"]:
         config["type"] = "info"
@@ -1147,9 +1227,22 @@ def end_day_by_owner():
     if not _is_owner(game, owner_token):
         return jsonify({"error": "仅房主可结束白天"}), 403
     if game.current_phase != "day":
-        return jsonify({"error": "当前不是白天"}), 400
-    if _get_active_voting_nomination(game):
-        return jsonify({"error": "仍有提名在投票中，请先结束当前投票"}), 400
+        game_end = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
+        return jsonify({
+            "success": True,
+            "already_transitioned": True,
+            "current_phase": game.current_phase,
+            "game_end": game_end
+        })
+    active_nomination = _get_active_voting_nomination(game)
+    if active_nomination:
+        deadline = active_nomination.get("vote_deadline_at", 0)
+        if deadline and time.time() >= float(deadline):
+            close_result = _close_nomination_if_active(game, active_nomination, "owner_deadline_finalize")
+            if not close_result.get("success"):
+                return jsonify({"error": close_result.get("error", "结算失败")}), 400
+        else:
+            return jsonify({"error": "仍有提名在投票中，请先结束当前投票"}), 400
 
     result = _end_day_and_start_night(game)
     if not result.get("success"):

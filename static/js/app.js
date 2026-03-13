@@ -47,6 +47,26 @@ async function apiCall(endpoint, method = 'GET', data = null) {
     return response.json();
 }
 
+function patchSelectOptions(selectEl, optionsHtml, fallbackValue = '') {
+    if (!selectEl) return;
+    const previousValue = String(selectEl.value || '');
+    if (selectEl.innerHTML !== optionsHtml) {
+        selectEl.innerHTML = optionsHtml;
+    }
+    const hasPrevious = Array.from(selectEl.options).some(opt => String(opt.value) === previousValue);
+    if (hasPrevious) {
+        selectEl.value = previousValue;
+        return;
+    }
+    if (fallbackValue !== null && fallbackValue !== undefined) {
+        const fallback = String(fallbackValue);
+        const hasFallback = Array.from(selectEl.options).some(opt => String(opt.value) === fallback);
+        if (hasFallback) {
+            selectEl.value = fallback;
+        }
+    }
+}
+
 // ===== 加载剧本 =====
 async function loadScripts() {
     scripts = await apiCall('/api/scripts');
@@ -535,11 +555,12 @@ function updateRedHerringOptions() {
     const fortuneTeller = gameState.players.find(p => p.role && p.role.id === 'fortune_teller');
     const preselectedId = fortuneTeller?.red_herring_id;
     
-    select.innerHTML = '<option value="">-- 选择玩家 --</option>' + 
+    const optionsHtml = '<option value="">-- 选择玩家 --</option>' + 
         goodPlayers.map(p => {
             const isPreselected = p.id === preselectedId;
             return `<option value="${p.id}" ${isPreselected ? 'selected' : ''}>${p.name} (${p.role?.name || '未知'})${isPreselected ? ' [预选]' : ''}</option>`;
         }).join('');
+    patchSelectOptions(select, optionsHtml, preselectedId || '');
 }
 
 async function confirmRedHerring() {
@@ -939,11 +960,12 @@ function updatePlayerSelects() {
     const alivePlayers = gameState.players.filter(p => p.alive);
     const allPlayers = gameState.players;
     
-    nominatorSelect.innerHTML = '<option value="">选择提名者</option>' +
+    const nominatorOptionsHtml = '<option value="">选择提名者</option>' +
         alivePlayers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    
-    nomineeSelect.innerHTML = '<option value="">选择被提名者</option>' +
+    const nomineeOptionsHtml = '<option value="">选择被提名者</option>' +
         allPlayers.map(p => `<option value="${p.id}">${p.name}${p.alive ? '' : ' (已死亡)'}</option>`).join('');
+    patchSelectOptions(nominatorSelect, nominatorOptionsHtml, '');
+    patchSelectOptions(nomineeSelect, nomineeOptionsHtml, '');
 }
 
 // ===== 阶段控制 =====
@@ -2665,8 +2687,9 @@ async function checkSlayerAbility() {
         
         // 填充目标选择
         const alivePlayers = gameState.players.filter(p => p.alive && p.id !== result.slayer_id);
-        slayerTargetSelect.innerHTML = '<option value="">选择目标</option>' + 
+        const slayerOptionsHtml = '<option value="">选择目标</option>' + 
             alivePlayers.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+        patchSelectOptions(slayerTargetSelect, slayerOptionsHtml, '');
         
         // 存储杀手 ID
         slayerSection.dataset.slayerId = result.slayer_id;
@@ -3155,8 +3178,9 @@ function showMayorSubstituteModal(mayor, resolve) {
     // 更新选项
     const select = document.getElementById('mayorSubstituteSelect');
     const otherPlayers = gameState.players.filter(p => p.id !== mayor.id && p.alive);
-    select.innerHTML = '<option value="">-- 让镇长自己死亡 --</option>' + 
+    const mayorSubstituteOptionsHtml = '<option value="">-- 让镇长自己死亡 --</option>' + 
         otherPlayers.map(p => `<option value="${p.id}">${p.name} (${p.role?.name || '未知'})</option>`).join('');
+    patchSelectOptions(select, mayorSubstituteOptionsHtml, '');
     
     modal.classList.add('active');
     
@@ -3226,8 +3250,9 @@ function showRavenkeeperModal(ravenkeeperPlayerId, ravenkeeperName) {
         
         // 更新选项
         const select = document.getElementById('ravenkeeperTargetSelect');
-        select.innerHTML = '<option value="">-- 选择玩家 --</option>' + 
+        const ravenkeeperOptionsHtml = '<option value="">-- 选择玩家 --</option>' + 
             gameState.players.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+        patchSelectOptions(select, ravenkeeperOptionsHtml, '');
         
         document.getElementById('ravenkeeperInfoResult').style.display = 'none';
         document.getElementById('closeRavenkeeper').style.display = 'none';
@@ -3685,8 +3710,9 @@ function showMoonchildModal(data) {
     const selectHtml = data.alive_players.map(p => 
         `<option value="${p.id}">${p.name}</option>`
     ).join('');
-    document.getElementById('moonchildTargetSelect').innerHTML = 
-        `<option value="">-- 不使用能力 --</option>` + selectHtml;
+    const moonchildSelect = document.getElementById('moonchildTargetSelect');
+    const moonchildOptionsHtml = `<option value="">-- 不使用能力 --</option>` + selectHtml;
+    patchSelectOptions(moonchildSelect, moonchildOptionsHtml, '');
     
     // 存储数据供后续使用
     modal.dataset.moonchildId = data.moonchild_id;

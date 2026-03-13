@@ -677,12 +677,16 @@ def get_night_action_type(role_id, role_type=None):
         return "pukka_poison"
     if role_id in ["monk", "innkeeper", "tea_lady"]:
         return "protect"
-    if role_id in ["godfather", "assassin"]:
+    if role_id in ["godfather"]:
         return "kill"
+    if role_id == "assassin":
+        return "assassin_kill"
     if role_id in ["poisoner"]:
         return "poison"
     if role_id in ["courtier"]:
         return "drunk"
+    if role_id == "gambler":
+        return "gambler_guess"
     if role_id == "sailor":
         return "sailor_drunk"
     if role_id in ["fortune_teller", "empath", "undertaker", "ravenkeeper", "dreamer", "chambermaid", "seamstress", "oracle", "flowergirl", "spy"]:
