@@ -857,6 +857,7 @@ async function endDayByOwner() {
     }
     await pollGameState();
     if (result.game_end?.ended) {
+        showGameEnd(result.game_end);
         return;
     }
     if (result.started_night || result.already_transitioned || playerState.currentPhase === 'night') {
@@ -1072,6 +1073,15 @@ async function publicSlayerShot() {
     if (result.error) {
         showInfo(result.error);
         return;
+    }
+
+    if (result.target_died) {
+        // 立即更新本地状态
+        const target = playerState.players.find(p => p.id === targetId);
+        if (target) {
+            target.alive = false;
+            updatePlayerCircle();
+        }
     }
 
     showToast(result.public_message || '无事发生');
