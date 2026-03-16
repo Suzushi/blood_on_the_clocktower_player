@@ -2,6 +2,8 @@ from flask import Flask, render_template, request, jsonify, session
 import random
 import json
 import secrets
+import os
+import sys
 from datetime import datetime
 from game_data import SCRIPTS, ROLE_TYPES, get_role_distribution, NIGHT_ORDER_PHASES, DAY_PHASES, get_night_action_type
 from player_api import player_bp, init_player_api
@@ -55,6 +57,8 @@ class Game:
         self.night_deaths = []
         self.game_log = []
         self.created_at = datetime.now().isoformat()
+        
+        self._init_system_log()
         # 更新日期: 2026-01-05 - 驱魔人追踪
         self.exorcist_previous_targets = []  # 驱魔人上一晚目标
         self.demon_exorcised_tonight = False  # 恶魔今晚是否被驱魔
@@ -96,6 +100,36 @@ class Game:
             "mastermind_pending": self.mastermind_pending,
             "mastermind_resolution_day": self.mastermind_resolution_day
         }
+    
+    def _init_system_log(self):
+        try:
+            log_dir = "log"
+            os.makedirs(log_dir, exist_ok=True)
+            self.log_file_path = os.path.join(log_dir, f"{self.game_id}.log")
+            
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"{'='*80}\n")
+                f.write(f"游戏创建: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"游戏ID: {self.game_id}\n")
+                f.write(f"剧本: {self.script['name']} ({self.script_id})\n")
+                f.write(f"玩家数量: {self.player_count}\n")
+                f.write(f"{'='*80}\n\n")
+        except Exception as e:
+            print(f"[系统日志警告] 无法初始化日志: {e}", file=sys.stderr)
+    
+    def add_system_log(self, message, log_type="info"):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.game_log.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "type": log_type,
+            "message": message
+        })
+        
+        try:
+            with open(self.log_file_path, "a", encoding="utf-8") as f:
+                f.write(f"[{timestamp}] [{log_type.upper()}] {message}\n")
+        except Exception as e:
+            print(f"[系统日志警告] 无法写入日志: {e}", file=sys.stderr)
     
     def add_log(self, message, log_type="info"):
         self.game_log.append({
@@ -222,6 +256,11 @@ class Game:
             self.players.append(player)
         
         self.add_log(f"已随机分配 {len(player_names)} 名玩家的角色", "setup")
+        role_list = []
+        for p in self.players:
+            role_name = p.get('role', {}).get('name', '未知')
+            role_list.append(f"玩家{p['id']}({p['name']}) - {role_name}")
+        self.add_system_log(f"角色分配完成：{', '.join(role_list)}", "setup")
         
         # 检查是否有占卜师，如果有，需要设置红鲱鱼
         fortune_teller = next((p for p in self.players if p.get("role") and p["role"].get("id") == "fortune_teller"), None)
@@ -290,6 +329,11 @@ class Game:
             self.players.append(player)
         
         self.add_log(f"已手动分配 {len(assignments)} 名玩家的角色", "setup")
+        role_list = []
+        for p in self.players:
+            role_name = p.get('role', {}).get('name', '未知')
+            role_list.append(f"玩家{p['id']}({p['name']}) - {role_name}")
+        self.add_system_log(f"角色分配完成：{', '.join(role_list)}", "setup")
         
         # 更新日期: 2026-01-05 - 手动分配也需要检查并设置占卜师红鲱鱼
         # 检查是否有占卜师，如果有，需要设置红鲱鱼
@@ -388,6 +432,7 @@ class Game:
                     self.add_log(f"{player['name']} 的中毒状态已结束", "status")
             
         self.add_log(f"第 {self.night_number} 个夜晚开始", "phase")
+        self.add_system_log(f"第{self.night_number}个夜晚开始", "phase")
         
     def get_night_order(self):
         """获取夜晚行动顺序"""
@@ -456,6 +501,18 @@ class Game:
         target_player = next((p for p in self.players if p["id"] == target), None) if target else None
         role = self._get_player_actual_role(player) if player else {}
         role_id = (role or {}).get("id", "")
+        
+        if player:
+            role_name = role.get('name', '未知') if role else '未知'
+            target_info = ""
+            if target_player:
+                target_role = target_player.get('role', {})
+                target_role_name = target_role.get('name', '未知') if target_role else '未知'
+                target_info = f"对玩家{target}({target_player['name']}-{target_role_name})"
+            log_msg = f"第{self.night_number}天夜晚，玩家{player_id}({player['name']}-{role_name}){target_info}使用技能{action}"
+            if result:
+                log_msg += f"，{result}"
+            self.add_system_log(log_msg, "night_action")
         
         # 一次性技能角色列表
         once_per_game_roles = [
@@ -1221,6 +1278,7 @@ class Game:
                             self.add_log(f"🌙 月之子 {player['name']} 在夜间死亡，需要选择一名玩家", "game_event")
         
         self.add_log(f"第 {self.day_number} 天开始", "phase")
+        self.add_system_log(f"第{self.day_number}天开始", "phase")
     
     def nominate(self, nominator_id, nominee_id):
         """提名"""
@@ -1255,6 +1313,12 @@ class Game:
         
         self.nominations.append(nomination)
         self.add_log(f"{nominator['name']} 提名了 {nominee['name']}", "nomination")
+        
+        nominator_role = nominator.get('role', {})
+        nominator_role_name = nominator_role.get('name', '未知') if nominator_role else '未知'
+        nominee_role = nominee.get('role', {})
+        nominee_role_name = nominee_role.get('name', '未知') if nominee_role else '未知'
+        self.add_system_log(f"第{self.day_number}天，玩家{nominator_id}({nominator['name']}-{nominator_role_name})提名了玩家{nominee_id}({nominee['name']}-{nominee_role_name})", "nomination")
         
         # 检查贞洁者能力触发
         virgin_triggered = False
@@ -1344,6 +1408,10 @@ class Game:
         
         vote_text = "赞成" if vote_value else "反对"
         self.add_log(f"{voter['name']} 对 {nomination['nominee_name']} 投了{vote_text}票", "vote")
+        
+        voter_role = voter.get('role', {})
+        voter_role_name = voter_role.get('name', '未知') if voter_role else '未知'
+        self.add_system_log(f"第{self.day_number}天，玩家{voter_id}({voter['name']}-{voter_role_name})对被提名者{nomination['nominee_id']}({nomination['nominee_name']})投了{vote_text}票", "vote")
         return {"success": True}
     
     # 更新日期: 2026-01-02 - 修复圣徒能力，添加红唇女郎处决后检测
@@ -1482,6 +1550,10 @@ class Game:
                 "required_votes": required_votes
             })
             self.add_log(f"{nominee['name']} 被处决 (获得 {nomination['vote_count']}/{required_votes} 票)", "execution")
+            
+            nominee_role = nominee.get('role', {})
+            nominee_role_name = nominee_role.get('name', '未知') if nominee_role else '未知'
+            self.add_system_log(f"第{self.day_number}天，玩家{nominee['id']}({nominee['name']}-{nominee_role_name})被处决(获得{nomination['vote_count']}/{required_votes}票)", "execution")
             if was_minion:
                 minstrel = next(
                     (p for p in self.players if p.get("alive", True) and p.get("role", {}).get("id") == "minstrel"),
@@ -1497,7 +1569,7 @@ class Game:
             # 圣徒判定：必须是真正的圣徒角色，且没有醉酒/中毒
             if nominee_role_id == "saint":
                 if self._is_ability_active(nominee, "被动技能:saint"):
-                    self.add_log(f"⚡ 圣徒 {nominee['name']} 被处决！邪恶阵营获胜！", "game_end")
+                    self.add_log("🏆 游戏结束！邪恶阵营获胜！圣徒被处决", "game_end")
                     return {
                         "success": True, 
                         "executed": True, 
@@ -1662,11 +1734,13 @@ class Game:
     def check_game_end(self, apply_scarlet_woman=False, allow_mayor_day_end=False):
         """检查游戏是否结束"""
         if self.mastermind_forced_winner:
+            winner_text = "善良阵营" if self.mastermind_forced_winner == "good" else "邪恶阵营"
+            self.add_log(f"🏆 游戏结束！{winner_text}获胜！主谋结算完成", "game_end")
+            self.add_system_log(f"游戏结束！{winner_text}获胜！主谋结算完成", "game_end")
             return {"ended": True, "winner": self.mastermind_forced_winner, "reason": "主谋结算完成"}
         alive_players, alive_non_travelers = self._alive_players_for_win_check()
         demons_alive = [p for p in alive_non_travelers if p.get("role_type") == "demon"]
 
-        # 恶魔死亡（优先于邪恶人数胜利，符合同时满足时善良胜）
         if not demons_alive:
             if self.mastermind_pending:
                 return {"ended": False, "mastermind_pending": True, "resolution_day": self.mastermind_resolution_day}
@@ -1674,14 +1748,18 @@ class Game:
                 scarlet_woman_result = self.check_scarlet_woman_trigger()
                 if scarlet_woman_result["triggered"]:
                     return {"ended": False, "scarlet_woman_triggered": True, "new_demon": scarlet_woman_result["new_demon_name"]}
+            self.add_log("🏆 游戏结束！善良阵营获胜！恶魔已被消灭", "game_end")
+            self.add_system_log("游戏结束！善良阵营获胜！恶魔已被消灭", "game_end")
             return {"ended": True, "winner": "good", "reason": "恶魔已被消灭"}
 
-        # 镇长胜利：仅在白天结束转夜晚时检查，且仅统计非旅行者人数
         if allow_mayor_day_end and len(alive_non_travelers) == 3 and not self._had_execution_today() and self._has_active_mayor():
+            self.add_log("🏆 游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜", "game_end")
+            self.add_system_log("游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜", "game_end")
             return {"ended": True, "winner": "good", "reason": "镇长在三人生还且无人处决时获胜"}
 
-        # 只剩2名非旅行者玩家且恶魔存活，邪恶获胜
         if len(alive_non_travelers) <= 2:
+            self.add_log("🏆 游戏结束！邪恶阵营获胜！邪恶势力占领了小镇", "game_end")
+            self.add_system_log("游戏结束！邪恶阵营获胜！邪恶势力占领了小镇", "game_end")
             return {"ended": True, "winner": "evil", "reason": "邪恶势力占领了小镇"}
 
         return {"ended": False}
@@ -2002,6 +2080,51 @@ class Game:
     def _distort_info_for_poison(self, info):
         return self._distort_info_for_malfunction(info)
     
+    def _is_player_effectively_killed_tonight(self, player_id):
+        if not hasattr(self, 'demon_kills'):
+            return False
+        
+        protected = getattr(self, 'protected_players', [])
+        
+        for kill in self.demon_kills:
+            target_id = kill["target_id"]
+            if target_id != player_id:
+                continue
+            
+            target_player = next((p for p in self.players if p["id"] == target_id), None)
+            if not target_player:
+                continue
+            if not target_player.get("alive", True):
+                continue
+            
+            force_death = bool(kill.get("ignore_protection"))
+            if force_death:
+                return True
+            
+            if target_id in protected:
+                continue
+            
+            if target_player.get("role") and target_player["role"].get("id") == "soldier":
+                if self._is_ability_active(target_player, "被动技能:soldier"):
+                    continue
+            
+            if self._is_protected_by_tea_lady(target_id):
+                continue
+            
+            if target_player.get("role") and target_player["role"].get("id") == "fool":
+                if not target_player.get("fool_used") and not target_player.get("drunk") and not target_player.get("poisoned"):
+                    continue
+            
+            if target_player.get("role") and target_player["role"].get("id") == "mayor":
+                if self._is_ability_active(target_player, "被动技能:mayor_substitute"):
+                    candidates = [p for p in self.players if p.get("alive", True) and p["id"] != target_id]
+                    if candidates and random.random() < MAYOR_SUBSTITUTE_RATE:
+                        continue
+            
+            return True
+        
+        return False
+
     def generate_info(self, player_id, info_type, targets=None):
         """生成角色信息"""
         player = next((p for p in self.players if p["id"] == player_id), None)
@@ -2010,6 +2133,10 @@ class Game:
         
         role = player["role"]
         role_id = role["id"]
+        
+        if self._is_player_effectively_killed_tonight(player_id):
+            self.add_log(f"[系统] {player['name']} 今晚被恶魔击杀，无法获取信息", "info")
+            return {"message": "你今晚无法获取信息", "killed_tonight": True}
         
         is_drunk = player.get("drunk", False)
         is_poisoned = player.get("poisoned", False)
@@ -2521,7 +2648,7 @@ def start_night(game_id):
             game.mastermind_pending = False
             game.mastermind_resolution_day = None
             game.mastermind_forced_winner = "good"
-            game.add_log("🧠 主谋结算：延长日无人被处决，善良阵营获胜", "game_end")
+            game.add_log("🏆 游戏结束！善良阵营获胜！主谋延长日无人被处决", "game_end")
             return jsonify({
                 "success": True,
                 "game_end": {"ended": True, "winner": "good", "reason": "主谋延长日无人被处决"}
