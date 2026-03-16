@@ -14,3 +14,6 @@ _INDEX_TEMPLATE.md
 
 # Cursor IDE 配置 (IDE-specific, not needed for other developers)
 .cursor/*
+
+# trae 配置
+.trae/*
