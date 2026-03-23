@@ -36,8 +36,11 @@ const playerState = {
     isRoomOwner: false,
     ownerToken: null,
     reconnectToken: null,
+    roomCode: null,
     gameEndedShown: false
 };
+
+const OWNER_DRAFT_KEY = 'ownerDraftState';
 
 // ==================== API 调用 ====================
 async function apiCall(endpoint, method = 'GET', data = null) {
@@ -94,7 +97,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (state.gameId && state.playerId && state.reconnectToken) {
                 playerState.ownerToken = state.ownerToken || null;
                 playerState.isRoomOwner = !!state.ownerToken;
+                playerState.roomCode = state.roomCode || null;
                 playerState.reconnectToken = state.reconnectToken;
+                updateRoomCodeDisplay(playerState.roomCode);
                 reconnectToGame(state.gameId, state.playerId, state.reconnectToken);
             } else {
                 localStorage.removeItem('playerState');
@@ -217,6 +222,9 @@ async function createGame() {
     playerState.gameId = gameId;
     playerState.isRoomOwner = true;
     playerState.ownerToken = ownerToken || null;
+    playerState.roomCode = joinCode;
+    saveOwnerDraftState(gameId, ownerToken || null, joinCode);
+    updateRoomCodeDisplay(playerState.roomCode);
     selectedPlayerId = null;
     
     document.getElementById('gameCodeInput').value = joinCode;
@@ -247,10 +255,27 @@ async function findGame() {
         return;
     }
     
+    const previousGameId = playerState.gameId;
+    const previousOwnerToken = playerState.ownerToken;
+    const ownerDraft = getOwnerDraftState();
+    const matchedDraftToken = ownerDraft && ownerDraft.gameId === result.game_id ? ownerDraft.ownerToken : null;
+
     playerState.gameId = result.game_id;
-    playerState.isRoomOwner = false;
-    playerState.ownerToken = null;
+    playerState.roomCode = String(gameCode).toUpperCase();
+    if (previousGameId === result.game_id && previousOwnerToken) {
+        playerState.isRoomOwner = true;
+        playerState.ownerToken = previousOwnerToken;
+    } else if (matchedDraftToken) {
+        playerState.isRoomOwner = true;
+        playerState.ownerToken = matchedDraftToken;
+    } else {
+        playerState.isRoomOwner = false;
+        playerState.ownerToken = null;
+    }
+
     displayPlayerSelection(result.players);
+    updateRoomCodeDisplay(playerState.roomCode);
+    resolveRoomCode(result.game_id, playerState.roomCode);
 }
 
 function displayPlayerSelection(players) {
@@ -344,6 +369,8 @@ async function reconnectToGame(gameId, playerId, reconnectToken) {
     playerState.nightNumber = result.night_number;
     playerState.players = result.players;
     playerState.reconnectToken = result.reconnect_token || reconnectToken || null;
+    updateRoomCodeDisplay(playerState.roomCode);
+    resolveRoomCode(gameId, playerState.roomCode);
     saveState();
     
     showGamePanel();
@@ -356,8 +383,65 @@ function saveState() {
         gameId: playerState.gameId,
         playerId: playerState.playerId,
         ownerToken: playerState.ownerToken,
-        reconnectToken: playerState.reconnectToken
+        reconnectToken: playerState.reconnectToken,
+        roomCode: playerState.roomCode
     }));
+}
+
+function saveOwnerDraftState(gameId, ownerToken, roomCode = null) {
+    if (!gameId || !ownerToken) return;
+    localStorage.setItem(OWNER_DRAFT_KEY, JSON.stringify({
+        gameId,
+        ownerToken,
+        roomCode
+    }));
+}
+
+function getOwnerDraftState() {
+    const raw = localStorage.getItem(OWNER_DRAFT_KEY);
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!parsed.gameId || !parsed.ownerToken) return null;
+        return parsed;
+    } catch (e) {
+        return null;
+    }
+}
+
+function updateRoomCodeDisplay(code) {
+    const badge = document.getElementById('roomCodeBadge');
+    const valueEl = document.getElementById('roomCodeValue');
+    if (!badge || !valueEl) return;
+    const normalized = (code || '').toString().trim();
+    if (!normalized) {
+        badge.style.display = 'none';
+        valueEl.textContent = '--';
+        return;
+    }
+    valueEl.textContent = normalized;
+    badge.style.display = 'inline-flex';
+}
+
+async function resolveRoomCode(gameId, fallbackCode = '') {
+    if (!gameId) return;
+    const result = await apiCall(`/api/game/${gameId}/code`);
+    if (result && !result.error) {
+        const resolved = result.short_code || result.full_code || fallbackCode || gameId;
+        playerState.roomCode = resolved;
+        const draft = getOwnerDraftState();
+        if (draft && draft.gameId === gameId && draft.ownerToken) {
+            saveOwnerDraftState(gameId, draft.ownerToken, resolved);
+        }
+        updateRoomCodeDisplay(resolved);
+        if (playerState.playerId && playerState.reconnectToken) {
+            saveState();
+        }
+        return;
+    }
+    const fallback = fallbackCode || gameId;
+    playerState.roomCode = fallback;
+    updateRoomCodeDisplay(fallback);
 }
 
 // ==================== 游戏面板 ====================

@@ -10,6 +10,7 @@ from player_api import player_bp, init_player_api
 from routes.gameplay_routes import gameplay_bp, init_gameplay_routes
 from config.balance import (
     POISON_FAILURE_RATE,
+    DRUNK_FAILURE_RATE,
     SPY_GOOD_REGISTRATION_RATE,
     MAYOR_SUBSTITUTE_RATE,
     RECLUSE_EVIL_REGISTRATION_RATE,
@@ -1075,7 +1076,7 @@ class Game:
                     "player_name": target_player["name"],
                     "cause": death_cause
                 })
-                if target_player.get("role") and target_player["role"].get("id") == "ravenkeeper":
+                if (self._get_player_actual_role(target_player) or {}).get("id") == "ravenkeeper":
                     if not target_player.get("poisoned") and not target_player.get("drunk"):
                         target_player["ravenkeeper_triggered"] = True
                         self.add_log(f"守鸦人 {target_player['name']} 在夜间死亡，需要唤醒选择一名玩家", "night")
@@ -1148,7 +1149,7 @@ class Game:
             })
             
             # 检查是否是守鸦人（死亡时被唤醒）
-            if target_player.get("role") and target_player["role"].get("id") == "ravenkeeper":
+            if (self._get_player_actual_role(target_player) or {}).get("id") == "ravenkeeper":
                 if not target_player.get("poisoned") and not target_player.get("drunk"):
                     target_player["ravenkeeper_triggered"] = True
                     self.add_log(f"守鸦人 {target_player['name']} 在夜间死亡，需要唤醒选择一名玩家", "night")
@@ -1171,8 +1172,7 @@ class Game:
         if not target_player:
             return
         
-        is_ravenkeeper = (target_player.get("role") and 
-                          target_player["role"].get("id") == "ravenkeeper")
+        is_ravenkeeper = (self._get_player_actual_role(target_player) or {}).get("id") == "ravenkeeper"
         if not is_ravenkeeper:
             return
         
@@ -1182,7 +1182,7 @@ class Game:
             return
         
         # 检查是否是士兵（不会被杀）
-        if target_player.get("role", {}).get("id") == "soldier":
+        if (self._get_player_actual_role(target_player) or {}).get("id") == "soldier":
             if self._is_ability_active(target_player, "被动技能:soldier"):
                 return
         
@@ -1322,7 +1322,7 @@ class Game:
         
         # 检查贞洁者能力触发
         virgin_triggered = False
-        nominee_role_id = nominee.get("role", {}).get("id") if nominee.get("role") else None
+        nominee_role_id = (self._get_player_actual_role(nominee) or {}).get("id")
         
         # 如果被提名者是贞洁者，且能力未使用，且提名者是镇民
         if (nominee_role_id == "virgin" and 
@@ -1564,7 +1564,7 @@ class Game:
                     self.add_log(f"🎻 吟游诗人 {minstrel['name']} 触发：其他玩家醉酒至第 {self.minstrel_effect_until_day} 天黄昏", "game_event")
             
             # 检查圣徒能力：如果被处决的是圣徒，邪恶阵营获胜
-            nominee_role_id = nominee.get("role", {}).get("id") if nominee.get("role") else None
+            nominee_role_id = (self._get_player_actual_role(nominee) or {}).get("id")
             
             # 圣徒判定：必须是真正的圣徒角色，且没有醉酒/中毒
             if nominee_role_id == "saint":
@@ -1627,7 +1627,7 @@ class Game:
         if not target.get("alive", True):
             return {"success": False, "error": "目标玩家已死亡"}
 
-        is_real_slayer = shooter.get("role", {}).get("id") == "slayer"
+        is_real_slayer = (self._get_player_actual_role(shooter) or {}).get("id") == "slayer"
         recluse_register_as_demon = (
             (target.get("role") or {}).get("id") == "recluse"
             and self._is_ability_active(target, "被动技能:recluse_slayer")
@@ -1824,10 +1824,34 @@ class Game:
         self.add_log(f"[系统] {player['name']} 中毒判定：{'失效' if failed else '生效'}（{scene or '技能'}）", "info")
         return failed
 
+    def _roll_drunk_failure(self, player, scene=""):
+        if not player or not player.get("drunk", False):
+            return False
+        failed = random.random() < DRUNK_FAILURE_RATE
+        self.add_log(f"[系统] {player['name']} 醉酒判定：{'失效' if failed else '生效'}（{scene or '技能'}）", "info")
+        return failed
+
+    def _evaluate_malfunction(self, player, scene=""):
+        is_drunk = bool(player and player.get("drunk", False))
+        is_poisoned = bool(player and player.get("poisoned", False))
+        drunk_failed = self._roll_drunk_failure(player, scene) if is_drunk else False
+        poison_failed = self._roll_poison_failure(player, scene) if is_poisoned else False
+        drunk_malfunctioned = is_drunk and not drunk_failed
+        poison_malfunctioned = is_poisoned and not poison_failed
+        return {
+            "is_drunk": is_drunk,
+            "is_poisoned": is_poisoned,
+            "drunk_failed": drunk_failed,
+            "poison_failed": poison_failed,
+            "drunk_malfunctioned": drunk_malfunctioned,
+            "poison_malfunctioned": poison_malfunctioned,
+            "malfunctioned": drunk_malfunctioned or poison_malfunctioned
+        }
+
     def _is_ability_active(self, player, scene=""):
         if not player:
             return False
-        player_role_id = (player.get("role") or {}).get("id")
+        player_role_id = (self._get_player_actual_role(player) or {}).get("id")
         
         # 某些角色死亡后仍有能力（如僵怖、复仇者等），这里需要特殊处理
         if not player.get("alive", True):
@@ -1837,22 +1861,10 @@ class Game:
         if self.minstrel_effect_until_day is not None and self.day_number <= self.minstrel_effect_until_day and player_role_id != "minstrel":
             self.add_log(f"[系统] {player['name']} 受吟游诗人效果影响，能力失效（{scene or '技能'}）", "info")
             return False
-        if player.get("drunk", False):
-            self.add_log(f"[系统] {player['name']} 醉酒导致能力失效（{scene or '技能'}）", "info")
+        status_eval = self._evaluate_malfunction(player, scene)
+        if status_eval["malfunctioned"]:
+            self.add_log(f"[系统] {player['name']} 因醉酒/中毒导致能力失效（{scene or '技能'}）", "info")
             return False
-            
-        # 检查是否中毒
-        if player.get("poisoned"):
-            # 中毒判定：POISON_FAILURE_RATE 概率失效（即中毒生效），(1-RATE) 概率正常（即中毒失效）
-            # poison_failed=True 表示"中毒失效" -> 技能正常
-            # poison_failed=False 表示"中毒生效" -> 技能失效
-            poison_failed = self._roll_poison_failure(player, scene)
-            if not poison_failed:
-                # 中毒生效，技能失效
-                return False
-            # 中毒失效，技能正常
-            return True
-            
         return True
 
     def _spy_registers_as_good_for_info(self, target_player, scene=""):
@@ -2138,11 +2150,11 @@ class Game:
             self.add_log(f"[系统] {player['name']} 今晚被恶魔击杀，无法获取信息", "info")
             return {"message": "你今晚无法获取信息", "killed_tonight": True}
         
-        is_drunk = player.get("drunk", False)
-        is_poisoned = player.get("poisoned", False)
+        status_eval = self._evaluate_malfunction(player, f"信息:{role_id}")
+        is_drunk = status_eval["is_drunk"]
+        is_poisoned = status_eval["is_poisoned"]
         is_drunk_or_poisoned = is_drunk or is_poisoned
-        poison_failed = self._roll_poison_failure(player, f"信息:{role_id}") if is_poisoned else False
-        info_malfunctioned = is_drunk or (is_poisoned and not poison_failed)
+        info_malfunctioned = status_eval["malfunctioned"]
         
         # 获取目标玩家
         target_players = []

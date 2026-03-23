@@ -63,6 +63,29 @@
             color: var(--color-gold);
             letter-spacing: 0.1rem;
         }
+
+        .room-code-badge {
+            display: none;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.45rem 0.9rem;
+            border: 1px solid var(--color-blood);
+            border-radius: 999px;
+            background: rgba(0, 0, 0, 0.35);
+            color: var(--color-gold);
+            font-size: 0.9rem;
+            line-height: 1;
+        }
+
+        .room-code-badge .label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+        }
+
+        .room-code-badge .value {
+            font-family: 'Cinzel', serif;
+            letter-spacing: 0.08rem;
+        }
         
         .owner-control-panel {
             margin-top: 0.8rem;
@@ -577,6 +600,10 @@
                     <span class="logo-icon">🩸</span>
                     <h1>血染钟楼</h1>
                     <span class="subtitle">玩家端</span>
+                </div>
+                <div class="room-code-badge" id="roomCodeBadge">
+                    <span class="label">房间号</span>
+                    <span class="value" id="roomCodeValue">--</span>
                 </div>
                 <div class="game-info" id="gameInfo" style="display: none;">
                     <span class="player-name-display" id="playerNameDisplay"></span>

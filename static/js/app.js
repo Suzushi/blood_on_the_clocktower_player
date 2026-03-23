@@ -2478,18 +2478,22 @@ async function notifyNextPlayerAction(nextIndex) {
     
     if (roleId === 'fortune_teller') {
         actionConfig.max_targets = 2;
+        actionConfig.min_targets = 2;
         actionConfig.use_alive_only = false;
         actionConfig.description = '选择两名玩家进行占卜，你会得知他们中是否有恶魔';
     } else if (actionType === 'investigate') {
         actionConfig.max_targets = 2;
+        actionConfig.min_targets = 2;
         actionConfig.description = '选择两名玩家，你会得知他们中是否有恶魔';
     } else if (actionType === 'shabaloth_kill') {
         actionConfig.max_targets = 2;
+        actionConfig.min_targets = 2;
         actionConfig.description = '选择两名玩家，他们今晚将死亡';
     } else if (actionType === 'po_kill') {
         const poPlayer = gameState.players.find(p => p.id === nextItem.player_id);
         const canKillThree = poPlayer && poPlayer.po_skipped_last_night;
         actionConfig.max_targets = canKillThree ? 3 : 1;
+        actionConfig.min_targets = 0;
         actionConfig.description = canKillThree ? '选择最多3名玩家击杀' : '选择1名玩家击杀（或跳过以下次击杀3人）';
     } else if (actionType === 'pit_hag') {
         actionConfig.special = 'pit_hag';
@@ -2497,9 +2501,13 @@ async function notifyNextPlayerAction(nextIndex) {
     } else if (['empath', 'undertaker', 'oracle', 'flowergirl'].includes(roleId)) {
         actionConfig.is_info = true;
         actionConfig.can_select = false;
+        actionConfig.min_targets = 0;
+        actionConfig.max_targets = 0;
     } else if (['washerwoman', 'librarian', 'investigator', 'chef', 'clockmaker'].includes(roleId)) {
         actionConfig.is_info = true;
         actionConfig.can_select = false;
+        actionConfig.min_targets = 0;
+        actionConfig.max_targets = 0;
     }
     
     // 即使玩家离线也发送通知（玩家上线后会收到）

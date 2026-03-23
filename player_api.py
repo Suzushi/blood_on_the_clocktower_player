@@ -485,25 +485,18 @@ def _end_day_and_start_night(game):
     leading_id = getattr(game, "day_leading_nomination_id", None)
     tied = bool(getattr(game, "day_tied", False))
     execution_result = {"executed": False}
+    
     if leading_id and not tied:
         execution_result = game.execute(leading_id)
         if not execution_result.get("success"):
             return {"success": False, "error": execution_result.get("error", "结算失败")}
-        
-        # 检查处决后游戏是否结束（例如圣徒被处决）
-        if execution_result.get("game_end", {}).get("ended"):
-            return {
-                "success": True, 
-                "execution_result": execution_result, 
-                "game_end": execution_result["game_end"], 
-                "started_night": False
-            }
     else:
         game.add_log("[系统] 白天结束：无人被处决", "execution")
 
-    game_end = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
-    if game_end.get("ended"):
-        return {"success": True, "execution_result": execution_result, "game_end": game_end, "started_night": False}
+    final_game_end = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
+    
+    if final_game_end.get("ended"):
+        return {"success": True, "execution_result": execution_result, "game_end": final_game_end, "started_night": False}
 
     game.start_night()
     _start_auto_night_loop(game)
@@ -1672,11 +1665,13 @@ def notify_player_action():
         "phase": game.current_phase,
         "config": action_config,
         "targets": target_list,
+        "min_targets": action_config.get("min_targets", 1),
         "max_targets": action_config.get("max_targets", 1),
+        "unique_targets": action_config.get("unique_targets", True),
         "can_skip": action_config.get("can_skip", True),
         "description": action_config.get("description", role.get("ability", "")),
         "created_at": datetime.now().isoformat(),
-        "status": "pending",  # pending, submitted, confirmed
+        "status": "pending",
         "choice": None
     }
     
@@ -1835,29 +1830,13 @@ def ravenkeeper_choose():
     if player.get("ravenkeeper_choice_made"):
         return jsonify({"error": "已经做出选择", "result": player.get("ravenkeeper_result")}), 400
 
-    # 判断守鸦人是否中毒/醉酒
-    is_drunk_or_poisoned = player.get("drunk", False) or player.get("poisoned", False)
-
-    # 获取目标真实角色
-    if is_drunk_or_poisoned:
-        # 醉酒/中毒时给假信息：随机选一个不同的角色
-        import random
-        all_roles = []
-        for role_type in ["townsfolk", "outsider", "minion", "demon"]:
-            all_roles.extend(game.script["roles"].get(role_type, []))
-        real_role_id = target["role"]["id"] if target.get("role") else None
-        fake_roles = [r for r in all_roles if r["id"] != real_role_id]
-        if fake_roles:
-            fake_role = random.choice(fake_roles)
-            role_name = fake_role["name"]
-        else:
-            role_name = target["role"]["name"] if target.get("role") else "未知"
-    else:
-        # 正常情况：显示真实角色（酒鬼显示"酒鬼"）
-        if target.get("is_the_drunk") and target.get("true_role"):
-            role_name = target["true_role"]["name"]
-        else:
-            role_name = target["role"]["name"] if target.get("role") else "未知"
+    info = game.generate_info(player_id, "ravenkeeper", [target_id])
+    if not isinstance(info, dict):
+        return jsonify({"error": "守鸦人信息生成失败"}), 500
+    role_name = info.get("target_role")
+    if not role_name:
+        message = str(info.get("message", ""))
+        role_name = message.split(" 的角色是 ")[-1] if " 的角色是 " in message else "未知"
 
     result_data = {
         "target_id": target_id,
