@@ -453,6 +453,14 @@
             padding: 2rem;
             margin: 1rem 0;
         }
+
+        .night-info-panel {
+            background: rgba(21, 47, 74, 0.45);
+            border: 1px solid rgba(52, 152, 219, 0.6);
+            border-radius: var(--radius-lg);
+            padding: 1.2rem;
+            margin: 1rem 0;
+        }
         
         /* 连接状态 */
         .connection-status {
@@ -714,14 +722,14 @@
                         <p id="nominationStatus" style="margin-top: 1rem; color: var(--text-muted);"></p>
                     </div>
 
-                    <div class="voting-panel" id="publicSlayerPanel" style="display: none;">
+                    <div class="voting-panel" id="publicAbilityPanel" style="display: none;">
                         <h3>使用技能</h3>
                         <div class="target-select-group">
                             <label>目标玩家</label>
-                            <select id="publicSlayerTargetSelect" class="form-select"></select>
+                            <select id="publicAbilityTargetSelect" class="form-select"></select>
                         </div>
-                        <button class="btn btn-secondary" id="publicSlayerBtn" style="margin-top: 1rem; width: 100%;">使用技能</button>
-                        <p id="publicSlayerStatus" style="margin-top: 1rem; color: var(--text-muted);"></p>
+                        <button class="btn btn-secondary" id="publicAbilityBtn" style="margin-top: 1rem; width: 100%;">使用技能</button>
+                        <p id="publicAbilityStatus" style="margin-top: 1rem; color: var(--text-muted);"></p>
                     </div>
 
                     <!-- 投票面板 -->
@@ -750,6 +758,13 @@
                         <h3 id="nightActionTitle">你的回合</h3>
                         <div id="nightActionContent">
                             <!-- 夜间行动内容 -->
+                        </div>
+                    </div>
+
+                    <div class="night-info-panel" id="nightInfoPanel" style="display: none;">
+                        <h3 id="nightInfoTitle">📜 夜间信息</h3>
+                        <div id="nightInfoContent">
+                            <!-- 夜间信息内容 -->
                         </div>
                     </div>
                     
@@ -816,6 +831,6 @@
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='js/player.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/player.js') }}?v=20260324-11"></script>
 </body>
 </html>

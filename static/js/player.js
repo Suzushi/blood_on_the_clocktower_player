@@ -120,7 +120,7 @@ function initEventListeners() {
     });
     document.getElementById('joinGameBtn').addEventListener('click', joinGame);
     document.getElementById('nominateBtn').addEventListener('click', nominate);
-    document.getElementById('publicSlayerBtn').addEventListener('click', publicSlayerShot);
+    document.getElementById('publicAbilityBtn').addEventListener('click', submitPublicAbility);
     document.getElementById('voteYesBtn').addEventListener('click', () => vote(true));
     document.getElementById('voteNoBtn').addEventListener('click', () => vote(false));
     document.getElementById('forceExecuteBtn').addEventListener('click', forceExecuteActiveNomination);
@@ -548,6 +548,11 @@ async function pollGameState() {
         return;
     }
     
+    const previousPhase = playerState.currentPhase;
+    const previousMyTurn = playerState.myTurn;
+    const previousNightActionType = playerState.nightAction?.type || '';
+    const previousNightActionRole = playerState.nightAction?.role_id || '';
+    
     // 更新状态
     playerState.players = result.players;
     playerState.currentPhase = result.current_phase;
@@ -560,9 +565,18 @@ async function pollGameState() {
     playerState.hasVoteToken = result.my_status?.vote_token ?? true;
     playerState.nightAction = result.night_action;
     playerState.myTurn = !!result.my_turn;
+    const enteringNight = previousPhase !== 'night' && playerState.currentPhase === 'night';
+    const turnActivated = !previousMyTurn && playerState.myTurn;
+    const nightActionChanged = previousNightActionType !== (playerState.nightAction?.type || '') ||
+        previousNightActionRole !== (playerState.nightAction?.role_id || '');
+    const forcePendingRefresh = enteringNight || turnActivated || nightActionChanged;
+    if (previousPhase !== playerState.currentPhase) {
+        currentPendingAction = null;
+        currentPendingActionId = null;
+    }
     
     // 检查是否有说书人发送的待处理行动（夜间或白天）
-    const hasPendingActionShown = await checkPendingAction();
+    const hasPendingActionShown = await checkPendingAction(forcePendingRefresh);
     
     // 白天也检查是否有行动
     if (playerState.currentPhase === 'day') {
@@ -598,9 +612,6 @@ async function pollGameState() {
     
     // 处理夜间 - 不覆盖待处理行动面板、说书人信息或守鸦人面板
     if (playerState.currentPhase === 'night') {
-        const messageStillActive = playerState.hasActiveMessage && 
-            (Date.now() - playerState.messageShownAt < 60000);
-        
         // 守鸦人触发检查（优先级最高）
         const ravenkeeperActive = playerState.ravenkeeperTriggered && !playerState.ravenkeeperDismissed;
         if (ravenkeeperActive) {
@@ -608,17 +619,12 @@ async function pollGameState() {
         } else if (hasPendingActionShown) {
             // 待处理行动面板（选择目标/已提交等待）已显示，不覆盖
         } else if (result.my_turn && result.night_action) {
-            if (!messageStillActive) {
-                showNightAction(result.night_action);
-            }
+            playerState.hasActiveMessage = false;
+            showNightAction(result.night_action);
         } else if (result.waiting_for_action) {
-            if (!messageStillActive) {
-                showNightWaiting('等待轮到你的行动...');
-            }
+            showNightWaiting('等待轮到你的行动...');
         } else {
-            if (!messageStillActive) {
-                showNightWaiting();
-            }
+            showNightWaiting();
         }
         
         // 检查守鸦人是否被触发（每次轮询都检查）
@@ -662,6 +668,18 @@ function getMessageTypeLabel(type) {
         success: '结果'
     };
     return labels[type] || '消息';
+}
+
+function formatChoiceSummary({ skipped = false, roleId = '', actionType = '', targetNames = [] }) {
+    if (skipped) return '你选择跳过';
+    const normalizedRoleId = String(roleId || '');
+    const normalizedActionType = String(actionType || '');
+    const isSpyLogAction = normalizedRoleId === 'spy' || normalizedActionType === 'info_select';
+    if (isSpyLogAction && (!Array.isArray(targetNames) || targetNames.length === 0)) {
+        return '你已选择: 查看魔典';
+    }
+    const selected = (targetNames || []).filter(Boolean).join(', ');
+    return `你已选择: ${selected || '无'}`;
 }
 
 function renderMessageHistory() {
@@ -719,15 +737,13 @@ async function syncMessageHistory(force = false) {
 
 // 更新日期: 2026-01-12 - 在夜间行动面板中显示信息
 function displayMessageInNightPanel(msg) {
-    const nightPanel = document.getElementById('nightActionPanel');
-    const nightContent = document.getElementById('nightActionContent');
-    const nightWaiting = document.getElementById('nightWaiting');
+    const infoPanel = document.getElementById('nightInfoPanel');
+    const infoTitle = document.getElementById('nightInfoTitle');
+    const infoContent = document.getElementById('nightInfoContent');
     
-    if (!nightPanel || !nightContent) return;
+    if (!infoPanel || !infoContent || !infoTitle) return;
     
-    // 确保夜间面板可见
-    nightPanel.style.display = 'block';
-    nightWaiting.style.display = 'none';
+    infoPanel.style.display = 'block';
     
     const typeIcons = {
         'info': 'ℹ️',
@@ -737,8 +753,7 @@ function displayMessageInNightPanel(msg) {
     };
     const icon = typeIcons[msg.type] || '📜';
     
-    // 更新夜间行动面板内容
-    nightContent.innerHTML = `
+    infoContent.innerHTML = `
         <div class="info-received" style="background: linear-gradient(135deg, rgba(52, 152, 219, 0.2), rgba(0,0,0,0.3)); border: 2px solid #3498db; border-radius: 12px; padding: 1.5rem; text-align: center;">
             <div style="font-size: 3rem; margin-bottom: 1rem;">${icon}</div>
             <h4 style="color: var(--color-gold); margin-bottom: 1rem;">${msg.title || '来自说书人的信息'}</h4>
@@ -754,10 +769,7 @@ function displayMessageInNightPanel(msg) {
         </p>
     `;
     
-    // 更新标题
-    document.getElementById('nightActionTitle').textContent = '📜 说书人的信息';
-    
-    // 显示一个简短的提示弹窗
+    infoTitle.textContent = '📜 夜间信息';
     showToast(`${icon} 收到新信息`);
 }
 
@@ -839,7 +851,7 @@ function updateGameState() {
     document.getElementById('aliveCount').textContent = aliveCount;
     updateOwnerControls();
     updateNominationPanel();
-    updatePublicSlayerPanel();
+    updatePublicAbilityPanel();
 }
 
 function updateOwnerControls() {
@@ -973,8 +985,20 @@ function updatePublicLog(logs) {
         if (log.type === 'death') className += ' death';
         if (log.type === 'execution') className += ' execution';
         if (log.type === 'phase') className += ' phase';
-        
-        html += `<div class="${className}">${log.message}</div>`;
+        let displayMessage = log.message;
+        if (log.type === 'death') {
+            const raw = String(log.message || '');
+            const nightDeathMatch = raw.match(/(?:💀\s*)?(.+?)\s+在夜间死亡/);
+            const genericDeathMatch = raw.match(/(?:💀\s*)?(.+?)\s+死亡/);
+            if (nightDeathMatch && nightDeathMatch[1]) {
+                displayMessage = `${nightDeathMatch[1]} 死亡`;
+            } else if (genericDeathMatch && genericDeathMatch[1]) {
+                displayMessage = `${genericDeathMatch[1]} 死亡`;
+            } else {
+                displayMessage = '有玩家死亡';
+            }
+        }
+        html += `<div class="${className}">${displayMessage}</div>`;
     });
     
     container.innerHTML = html;
@@ -1073,27 +1097,23 @@ async function nominate() {
     await pollGameState();
 }
 
-function updatePublicSlayerPanel() {
-    const panel = document.getElementById('publicSlayerPanel');
-    const targetSelect = document.getElementById('publicSlayerTargetSelect');
-    const btn = document.getElementById('publicSlayerBtn');
-    const status = document.getElementById('publicSlayerStatus');
+function updatePublicAbilityPanel() {
+    const panel = document.getElementById('publicAbilityPanel');
+    const targetSelect = document.getElementById('publicAbilityTargetSelect');
+    const btn = document.getElementById('publicAbilityBtn');
+    const status = document.getElementById('publicAbilityStatus');
     if (!panel || !targetSelect || !btn || !status) return;
 
-    if (playerState.currentPhase !== 'day' && playerState.currentPhase !== 'night') {
+    if (playerState.currentPhase !== 'day') {
         panel.style.display = 'none';
         return;
     }
     panel.style.display = 'block';
     const targets = playerState.players.filter(p => p.alive && p.id !== playerState.playerId);
     const targetOptionsHtml = targets.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    if (targets.length > 0) {
-        patchSelectOptions(targetSelect, targetOptionsHtml, targets[0].id);
-    } else if (targetSelect.innerHTML !== targetOptionsHtml) {
-        targetSelect.innerHTML = targetOptionsHtml;
-    }
-    const nightCanUse = playerState.currentPhase === 'night' ? playerState.myTurn : true;
-    btn.disabled = !playerState.alive || targets.length === 0 || !nightCanUse;
+    const firstTargetId = targets[0]?.id || '';
+    patchSelectOptions(targetSelect, targetOptionsHtml, firstTargetId);
+    btn.disabled = !playerState.alive || targets.length === 0;
 
     if (!playerState.alive) {
         status.textContent = '你已死亡，不能使用技能';
@@ -1103,20 +1123,12 @@ function updatePublicSlayerPanel() {
         status.textContent = '当前没有可选目标';
         return;
     }
-    if (playerState.currentPhase === 'night' && playerState.myTurn) {
-        status.textContent = '夜晚可对目标使用技能（将按夜间规则结算）';
-    } else if (playerState.currentPhase === 'night') {
-        status.textContent = '未到你的夜间行动顺序，暂不能使用技能';
-    } else if (playerState.currentPhase === 'day') {
-        status.textContent = '白天可公开使用技能；若不满足触发条件则无事发生';
-    } else {
-        status.textContent = '当前角色在此阶段通常无可生效的主动技能';
-    }
+    status.textContent = '白天可公开使用技能；若不满足触发条件则无事发生';
 }
 
-async function publicSlayerShot() {
+async function submitPublicAbility() {
     if (!playerState.gameId || !playerState.playerId) return;
-    const targetId = parseInt(document.getElementById('publicSlayerTargetSelect')?.value, 10);
+    const targetId = parseInt(document.getElementById('publicAbilityTargetSelect')?.value, 10);
     if (!targetId) {
         showInfo('请选择技能目标');
         return;
@@ -1148,6 +1160,80 @@ async function publicSlayerShot() {
         return;
     }
     await pollGameState();
+}
+
+function renderSpyNightAction(action, usePendingSubmit = true) {
+    const executeHandler = usePendingSubmit ? 'submitPendingAction()' : `submitNightAction('${action.type}')`;
+    const skipHandler = usePendingSubmit ? 'submitPendingAction(true)' : `submitNightAction('${action.type}', true)`;
+    return `
+        <div class="action-notice" style="background: rgba(126, 87, 194, 0.2); border: 1px solid #7e57c2; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+            <p style="color: #b39ddb; font-weight: bold; margin-bottom: 0.5rem;">🕵️ 间谍夜间行动</p>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">${action.description || '你可以查看日志，或选择跳过本次能力'}</p>
+        </div>
+        <button class="btn btn-primary" onclick="${executeHandler}" style="margin-top: 1rem; width: 100%;">
+            ✓ 查看日志
+        </button>
+        <button class="btn btn-secondary" onclick="${skipHandler}" style="margin-top: 0.5rem; width: 100%;">
+            跳过 / 不使用技能
+        </button>
+    `;
+}
+
+function renderFortuneTellerNightAction(action, usePendingSubmit = true) {
+    const targets = action.targets || [];
+    const confirmHandler = usePendingSubmit ? 'submitPendingAction()' : `submitNightAction('${action.type}')`;
+    return `
+        <div class="action-notice" style="background: rgba(52, 152, 219, 0.2); border: 1px solid #3498db; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+            <p style="color: #3498db; font-weight: bold; margin-bottom: 0.5rem;">🔮 占卜师夜间行动</p>
+            <p style="color: var(--text-secondary); font-size: 0.9rem;">${action.description || '请选择两名玩家进行查验'}</p>
+        </div>
+        <div class="target-select-group">
+            <label>选择第一个目标:</label>
+            <select id="${usePendingSubmit ? 'pendingTarget1' : 'nightTarget1'}" class="form-select">
+                <option value="">-- 选择玩家 --</option>
+                ${targets.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+            </select>
+        </div>
+        <div class="target-select-group" style="margin-top: 1rem;">
+            <label>选择第二个目标:</label>
+            <select id="${usePendingSubmit ? 'pendingTarget2' : 'nightTarget2'}" class="form-select">
+                <option value="">-- 选择玩家 --</option>
+                ${targets.map(p => `<option value="${p.id}">${p.name}</option>`).join('')}
+            </select>
+        </div>
+        <button class="btn btn-primary" onclick="${confirmHandler}" style="margin-top: 1rem; width: 100%;">
+            ✓ 确认选择
+        </button>
+    `;
+}
+
+function getNightActionMeta(action) {
+    return {
+        roleId: action?.role_id || playerState.role?.id || '',
+        minTargets: Number(action?.min_targets ?? action?.config?.min_targets ?? 0),
+        maxTargets: Number(action?.max_targets ?? action?.config?.max_targets ?? 0),
+        canSkip: Boolean(action?.can_skip ?? action?.config?.can_skip ?? false)
+    };
+}
+
+const SPECIAL_NIGHT_ACTION_HANDLERS = [
+    {
+        id: 'spy_logs',
+        match: (meta) => meta.roleId === 'spy' && meta.maxTargets === 0,
+        render: renderSpyNightAction
+    },
+    {
+        id: 'fortune_teller_pair',
+        match: (meta) => meta.roleId === 'fortune_teller' && meta.minTargets === 2 && meta.maxTargets === 2 && !meta.canSkip,
+        render: renderFortuneTellerNightAction
+    }
+];
+
+function renderSpecialNightAction(action, usePendingSubmit = true) {
+    const meta = getNightActionMeta(action);
+    const handler = SPECIAL_NIGHT_ACTION_HANDLERS.find(item => item.match(meta));
+    if (!handler) return null;
+    return handler.render(action, usePendingSubmit);
 }
 
 function showVotingPanel(nomination) {
@@ -1384,20 +1470,15 @@ async function submitDayAction(skip = false) {
 let currentPendingActionId = null;
 
 // 检查是否有说书人发送的待处理行动，返回是否有活跃的待处理行动UI
-async function checkPendingAction() {
+async function checkPendingAction(forceRefresh = false) {
     if (!playerState.gameId || !playerState.playerId) return false;
-    
-    // 如果正在显示说书人发来的信息，不要覆盖
-    if (playerState.hasActiveMessage && (Date.now() - playerState.messageShownAt < 60000)) {
-        return true;
-    }
-    
+
     const result = await apiCall(`/api/player/pending_action/${playerState.gameId}/${playerState.playerId}`);
     
     if (result.has_pending && result.action) {
         // 如果是同一个待处理行动且UI已在显示，跳过重新渲染
         const actionId = result.action.created_at || result.action.player_id;
-        if (currentPendingActionId === actionId && currentPendingAction) {
+        if (!forceRefresh && currentPendingActionId === actionId && currentPendingAction) {
             return true;
         }
         
@@ -1425,6 +1506,7 @@ async function checkPendingAction() {
     }
     
     // 没有待处理行动，清除追踪
+    currentPendingAction = null;
     currentPendingActionId = null;
     return false;
 }
@@ -1436,9 +1518,14 @@ function showPendingAction(action) {
     document.getElementById('nightActionTitle').textContent = `${action.role_name || playerState.role?.name || '你'} 的回合`;
     
     const content = document.getElementById('nightActionContent');
-    const maxTargets = action.max_targets || 1;
-    const minTargets = action.min_targets ?? (action.can_skip ? 0 : 1);
+    const maxTargets = Number(action.max_targets ?? action.config?.max_targets ?? 1);
+    const minTargets = Number(action.min_targets ?? action.config?.min_targets ?? (action.can_skip ? 0 : 1));
     const targets = action.targets || [];
+    const specialPendingHtml = renderSpecialNightAction(action, true);
+    if (specialPendingHtml) {
+        content.innerHTML = specialPendingHtml;
+        return;
+    }
     
     let html = `
         <div class="action-notice" style="background: rgba(52, 152, 219, 0.2); border: 1px solid #3498db; border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
@@ -1447,7 +1534,14 @@ function showPendingAction(action) {
         </div>
     `;
     
-    if (targets.length > 0) {
+    const canSkip = Boolean(action.can_skip ?? action.config?.can_skip ?? true);
+    if (maxTargets === 0) {
+        html += `
+            <button class="btn btn-primary" onclick="submitPendingAction()" style="margin-top: 1rem; width: 100%;">
+                ✓ 执行技能
+            </button>
+        `;
+    } else if (targets.length > 0) {
         if (maxTargets === 1) {
             html += `
                 <div class="target-select-group">
@@ -1496,7 +1590,7 @@ function showPendingAction(action) {
         `;
     }
     
-    if (action.can_skip) {
+    if (canSkip) {
         html += `
             <button class="btn btn-secondary" onclick="submitPendingAction(true)" style="margin-top: 0.5rem; width: 100%;">
                 跳过 / 不选择
@@ -1533,12 +1627,18 @@ function showSubmittedState(action) {
     document.getElementById('nightActionTitle').textContent = `${action.role_name || playerState.role?.name || '你'} 的回合`;
     
     const content = document.getElementById('nightActionContent');
-    const targetNames = action.choice?.target_names?.join(', ') || '无';
+    const targetNames = action.choice?.target_names || [];
+    const summaryText = formatChoiceSummary({
+        skipped: !!action.choice?.skipped,
+        roleId: action.role_id || action.choice?.role_id || '',
+        actionType: action.action_type || action.config?.type || '',
+        targetNames
+    });
     
     content.innerHTML = `
         <div class="info-banner" style="background: rgba(39, 174, 96, 0.2); border-color: var(--color-alive);">
             <span class="icon">✓</span>
-            <span>${action.choice?.skipped ? '你选择跳过' : `你已选择: ${targetNames}`}</span>
+            <span>${summaryText}</span>
         </div>
         <p style="color: var(--text-muted); margin-top: 1rem;">选择已同步到说书人端，等待说书人发送结果...</p>
     `;
@@ -1562,8 +1662,8 @@ async function submitPendingAction(skip = false) {
         if (target2) targets.push(parseInt(target2));
         if (target3) targets.push(parseInt(target3));
 
-        const minTargets = currentPendingAction?.min_targets ?? (currentPendingAction?.can_skip ? 0 : 1);
-        const maxTargets = currentPendingAction?.max_targets ?? 1;
+        const minTargets = Number(currentPendingAction?.min_targets ?? currentPendingAction?.config?.min_targets ?? (currentPendingAction?.can_skip ? 0 : 1));
+        const maxTargets = Number(currentPendingAction?.max_targets ?? currentPendingAction?.config?.max_targets ?? 1);
         if (targets.length < minTargets) {
             showInfo(minTargets === 2 ? '需要选择两名玩家' : `至少需要选择 ${minTargets} 名玩家`);
             return;
@@ -1592,13 +1692,19 @@ async function submitPendingAction(skip = false) {
     
     // 显示已提交状态
     const content = document.getElementById('nightActionContent');
-    const targetNames = result.choice?.target_names?.join(', ') || 
-        targets.map(id => playerState.players.find(p => p.id === id)?.name).filter(Boolean).join(', ') || '无';
+    const targetNames = result.choice?.target_names ||
+        targets.map(id => playerState.players.find(p => p.id === id)?.name).filter(Boolean);
+    const summaryText = formatChoiceSummary({
+        skipped: skip,
+        roleId: currentPendingAction?.role_id || playerState.role?.id || '',
+        actionType: currentPendingAction?.action_type || currentPendingAction?.config?.type || '',
+        targetNames
+    });
     
     content.innerHTML = `
         <div class="info-banner" style="background: rgba(39, 174, 96, 0.2); border-color: var(--color-alive);">
             <span class="icon">✓</span>
-            <span>${skip ? '你选择跳过' : `你已选择: ${targetNames}`}</span>
+            <span>${summaryText}</span>
         </div>
         <p style="color: var(--text-muted); margin-top: 1rem;">选择已同步到说书人端，等待说书人发送结果...</p>
     `;
@@ -1825,10 +1931,16 @@ function showNightAction(action) {
     
     // 检查是否已提交选择
     if (playerState.playerChoice && !playerState.playerChoice.confirmed) {
+        const playerChoiceSummary = formatChoiceSummary({
+            skipped: !!playerState.playerChoice.skipped,
+            roleId: playerState.playerChoice.role_id || playerState.role?.id || '',
+            actionType: playerState.playerChoice.action_type || action.type || '',
+            targetNames: playerState.playerChoice.target_names || []
+        });
         content.innerHTML = `
             <div class="info-banner" style="background: rgba(39, 174, 96, 0.2); border-color: var(--color-alive);">
                 <span class="icon">✓</span>
-                <span>你已选择: ${playerState.playerChoice.target_names?.join(', ') || '无'}</span>
+                <span>${playerChoiceSummary}</span>
             </div>
             <p style="color: var(--text-muted); margin-top: 1rem;">等待说书人处理...</p>
         `;
@@ -1841,10 +1953,34 @@ function showNightAction(action) {
         </p>
     `;
     
-    if (action.can_select && action.targets && action.targets.length > 0) {
-        const maxTargets = action.max_targets || 1;
-        
-        if (maxTargets === 1) {
+    if (action.can_select) {
+        const specialNightHtml = renderSpecialNightAction(action, false);
+        if (specialNightHtml) {
+            content.innerHTML = specialNightHtml;
+            return;
+        }
+        const maxTargets = Number(action.max_targets ?? action.config?.max_targets ?? 1);
+        const canSkip = Boolean(action.can_skip ?? action.config?.can_skip ?? true);
+        const targets = action.targets || [];
+
+        if (maxTargets === 0) {
+            html += `
+                <div class="info-banner" style="margin-top: 0.5rem;">
+                    <span class="icon">🕵️</span>
+                    <span>本技能无需选择目标，可直接执行或跳过</span>
+                </div>
+                <button class="btn btn-primary" onclick="submitNightAction('${action.type}')" style="margin-top: 1rem; width: 100%;">
+                    ✓ 执行技能
+                </button>
+            `;
+            if (canSkip) {
+                html += `
+                    <button class="btn btn-secondary" onclick="submitNightAction('${action.type}', true)" style="margin-top: 0.5rem; width: 100%;">
+                        跳过 / 不使用技能
+                    </button>
+                `;
+            }
+        } else if (targets.length > 0 && maxTargets === 1) {
             html += `
                 <div class="target-select-group">
                     <label>选择目标:</label>
@@ -1854,7 +1990,19 @@ function showNightAction(action) {
                     </select>
                 </div>
             `;
-        } else {
+            html += `
+                <button class="btn btn-primary" onclick="submitNightAction('${action.type}')" style="margin-top: 1rem; width: 100%;">
+                    ✓ 确认选择
+                </button>
+            `;
+            if (canSkip) {
+                html += `
+                    <button class="btn btn-secondary" onclick="submitNightAction('${action.type}', true)" style="margin-top: 0.5rem; width: 100%;">
+                        跳过 / 不选择
+                    </button>
+                `;
+            }
+        } else if (targets.length > 0) {
             html += `
                 <div class="target-select-group">
                     <label>选择第一个目标:</label>
@@ -1871,16 +2019,33 @@ function showNightAction(action) {
                     </select>
                 </div>
             `;
+            html += `
+                <button class="btn btn-primary" onclick="submitNightAction('${action.type}')" style="margin-top: 1rem; width: 100%;">
+                    ✓ 确认选择
+                </button>
+            `;
+            if (canSkip) {
+                html += `
+                    <button class="btn btn-secondary" onclick="submitNightAction('${action.type}', true)" style="margin-top: 0.5rem; width: 100%;">
+                        跳过 / 不选择
+                    </button>
+                `;
+            }
+        } else {
+            html += `
+                <div class="info-banner">
+                    <span class="icon">⏳</span>
+                    <span>当前无可选目标，等待说书人处理...</span>
+                </div>
+            `;
+            if (canSkip) {
+                html += `
+                    <button class="btn btn-secondary" onclick="submitNightAction('${action.type}', true)" style="margin-top: 0.5rem; width: 100%;">
+                        跳过 / 不选择
+                    </button>
+                `;
+            }
         }
-        
-        html += `
-            <button class="btn btn-primary" onclick="submitNightAction('${action.type}')" style="margin-top: 1rem; width: 100%;">
-                ✓ 确认选择
-            </button>
-            <button class="btn btn-secondary" onclick="submitNightAction('${action.type}', true)" style="margin-top: 0.5rem; width: 100%;">
-                跳过 / 不选择
-            </button>
-        `;
     } else if (action.type === 'info') {
         html += `
             <div class="info-banner">
@@ -1926,12 +2091,18 @@ async function submitNightAction(actionType, skip = false) {
     
     // 显示已提交状态
     const content = document.getElementById('nightActionContent');
-    const targetNames = result.choice?.target_names?.join(', ') || '无';
+    const targetNames = result.choice?.target_names || [];
+    const summaryText = formatChoiceSummary({
+        skipped: skip,
+        roleId: result.choice?.role_id || playerState.role?.id || '',
+        actionType,
+        targetNames
+    });
     
     content.innerHTML = `
         <div class="info-banner" style="background: rgba(39, 174, 96, 0.2); border-color: var(--color-alive);">
             <span class="icon">✓</span>
-            <span>${skip ? '你选择跳过' : `你已选择: ${targetNames}`}</span>
+            <span>${summaryText}</span>
         </div>
         <p style="color: var(--text-muted); margin-top: 1rem;">选择已同步到说书人端，等待处理...</p>
     `;
@@ -1940,6 +2111,7 @@ async function submitNightAction(actionType, skip = false) {
 function hideNightPanels() {
     document.getElementById('nightWaiting').style.display = 'none';
     document.getElementById('nightActionPanel').style.display = 'none';
+    document.getElementById('nightInfoPanel').style.display = 'none';
 }
 
 // ==================== 游戏结束 ====================

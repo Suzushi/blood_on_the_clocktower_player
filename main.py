@@ -1,13 +1,11 @@
-from flask import Flask, render_template, request, jsonify, session
+from flask import Flask
 import random
-import json
-import secrets
 import os
 import sys
 from datetime import datetime
 from game_data import SCRIPTS, ROLE_TYPES, get_role_distribution, NIGHT_ORDER_PHASES, DAY_PHASES, get_night_action_type
 from player_api import player_bp, init_player_api
-from routes.gameplay_routes import gameplay_bp, init_gameplay_routes
+from routes.game_routes import game_routes_bp, init_game_routes
 from config.balance import (
     POISON_FAILURE_RATE,
     DRUNK_FAILURE_RATE,
@@ -29,7 +27,7 @@ from services.info_generators import (
 )
 
 app = Flask(__name__)
-app.secret_key = 'blood_on_the_clocktower_storyteller_secret_key_2026'
+app.secret_key = 'blood_on_the_clocktower_player_secret_key_2026'
 
 # 全局游戏状态存储
 games = {}
@@ -37,8 +35,6 @@ games = {}
 # 注册玩家端蓝图
 app.register_blueprint(player_bp)
 init_player_api(games)
-app.register_blueprint(gameplay_bp)
-init_gameplay_routes(games)
 
 class Game:
     def __init__(self, game_id, script_id, player_count):
@@ -80,6 +76,7 @@ class Game:
         self.mastermind_pending = False
         self.mastermind_resolution_day = None
         self.mastermind_forced_winner = None
+        self.game_end_snapshot = None
         
     def to_dict(self):
         return {
@@ -138,6 +135,45 @@ class Game:
             "type": log_type,
             "message": message
         })
+
+    def _compact_log_text(self, text, max_length=180):
+        if text is None:
+            return ""
+        normalized = str(text).strip()
+        if not normalized:
+            return ""
+        first_line = normalized.splitlines()[0].strip()
+        if len(first_line) > max_length:
+            return first_line[:max_length - 1] + "…"
+        return first_line
+
+    def _finalize_game_end(self, winner, reason, system_message, public_message=None):
+        if self.game_end_snapshot:
+            return dict(self.game_end_snapshot)
+        public_text = public_message or f"🏆 {system_message}"
+        self.add_log(public_text, "game_end")
+        self.add_system_log(system_message, "game_end")
+        self.game_end_snapshot = {"ended": True, "winner": winner, "reason": reason}
+        return dict(self.game_end_snapshot)
+
+    def _player_label(self, player):
+        if not player:
+            return "未知玩家"
+        role_obj = self._get_player_actual_role(player) or {}
+        role_name = role_obj.get("name") or (player.get("role") or {}).get("name") or "未知角色"
+        return f"{player['name']}({role_name})"
+
+    def _log_ability_event(self, player, action, targets=None, effect=None, log_type="ability"):
+        target_labels = []
+        for target in (targets or []):
+            target_player = target if isinstance(target, dict) else next((p for p in self.players if p["id"] == target), None)
+            if target_player:
+                target_labels.append(self._player_label(target_player))
+        target_text = f"，目标: {', '.join(target_labels)}" if target_labels else ""
+        compact_effect = self._compact_log_text(effect)
+        effect_text = f"，效果: {compact_effect}" if compact_effect else ""
+        msg = f"第{self.night_number}夜 技能记录: {self._player_label(player)} 使用 {action}{target_text}{effect_text}"
+        self.add_system_log(msg, log_type)
     
     def get_available_roles(self):
         """获取当前剧本的所有可用角色"""
@@ -432,7 +468,6 @@ class Game:
                     player["poisoned_until"] = None
                     self.add_log(f"{player['name']} 的中毒状态已结束", "status")
             
-        self.add_log(f"第 {self.night_number} 个夜晚开始", "phase")
         self.add_system_log(f"第{self.night_number}个夜晚开始", "phase")
         
     def get_night_order(self):
@@ -507,13 +542,15 @@ class Game:
             role_name = role.get('name', '未知') if role else '未知'
             target_info = ""
             if target_player:
-                target_role = target_player.get('role', {})
-                target_role_name = target_role.get('name', '未知') if target_role else '未知'
+                target_role = self._get_player_actual_role(target_player) or {}
+                target_role_name = target_role.get('name', '未知')
                 target_info = f"对玩家{target}({target_player['name']}-{target_role_name})"
             log_msg = f"第{self.night_number}天夜晚，玩家{player_id}({player['name']}-{role_name}){target_info}使用技能{action}"
-            if result:
-                log_msg += f"，{result}"
+            compact_result = self._compact_log_text(result)
+            if compact_result:
+                log_msg += f"，{compact_result}"
             self.add_system_log(log_msg, "night_action")
+            self._log_ability_event(player, action_type or action, [target_player] if target_player else [], compact_result or "已提交")
         
         # 一次性技能角色列表
         once_per_game_roles = [
@@ -534,6 +571,7 @@ class Game:
             if not self._is_ability_active(player, f"夜间行动:{action_type}"):
                 self.night_actions[-1]["result"] = "能力失效"
                 self.add_log(f"[夜间] {player['name']} 因醉酒/中毒导致技能失效", "night")
+                self._log_ability_event(player, action_type, [target_player] if target_player else [], "能力失效", "ability_fail")
                 return
         if target is not None and not target_player:
             self.night_actions[-1]["result"] = "非法目标"
@@ -1179,11 +1217,13 @@ class Game:
         # 检查是否被保护
         protected = getattr(self, 'protected_players', [])
         if target_id in protected:
+            self.add_log(f"[夜间] 守鸦人 {target_player['name']} 被保护，本次不触发守鸦人能力", "night")
             return
         
         # 检查是否是士兵（不会被杀）
         if (self._get_player_actual_role(target_player) or {}).get("id") == "soldier":
             if self._is_ability_active(target_player, "被动技能:soldier"):
+                self.add_log(f"[夜间] 守鸦人 {target_player['name']} 受士兵能力保护，本次不触发守鸦人能力", "night")
                 return
         
         # 守鸦人未中毒/醉酒时触发（中毒/醉酒时也触发，但给假信息，由API层处理）
@@ -1222,6 +1262,8 @@ class Game:
                 "player_name": player["name"],
                 "cause": cause
             })
+            self.add_log(f"[夜间] {player['name']} 将于夜晚死亡，原因：{cause}", "night")
+            self.add_system_log(f"第{self.night_number}夜 死亡登记: {self._player_label(player)}，原因: {cause}", "death_register")
     
     def start_day(self):
         """开始白天"""
@@ -1277,7 +1319,6 @@ class Game:
                             self.pending_moonchild = player["id"]
                             self.add_log(f"🌙 月之子 {player['name']} 在夜间死亡，需要选择一名玩家", "game_event")
         
-        self.add_log(f"第 {self.day_number} 天开始", "phase")
         self.add_system_log(f"第{self.day_number}天开始", "phase")
     
     def nominate(self, nominator_id, nominee_id):
@@ -1733,11 +1774,16 @@ class Game:
     # 更新日期: 2026-01-02 - 添加红唇女郎能力检测
     def check_game_end(self, apply_scarlet_woman=False, allow_mayor_day_end=False):
         """检查游戏是否结束"""
+        if self.game_end_snapshot:
+            return dict(self.game_end_snapshot)
         if self.mastermind_forced_winner:
             winner_text = "善良阵营" if self.mastermind_forced_winner == "good" else "邪恶阵营"
-            self.add_log(f"🏆 游戏结束！{winner_text}获胜！主谋结算完成", "game_end")
-            self.add_system_log(f"游戏结束！{winner_text}获胜！主谋结算完成", "game_end")
-            return {"ended": True, "winner": self.mastermind_forced_winner, "reason": "主谋结算完成"}
+            return self._finalize_game_end(
+                self.mastermind_forced_winner,
+                "主谋结算完成",
+                f"游戏结束！{winner_text}获胜！主谋结算完成",
+                f"🏆 游戏结束！{winner_text}获胜！主谋结算完成"
+            )
         alive_players, alive_non_travelers = self._alive_players_for_win_check()
         demons_alive = [p for p in alive_non_travelers if p.get("role_type") == "demon"]
 
@@ -1748,19 +1794,28 @@ class Game:
                 scarlet_woman_result = self.check_scarlet_woman_trigger()
                 if scarlet_woman_result["triggered"]:
                     return {"ended": False, "scarlet_woman_triggered": True, "new_demon": scarlet_woman_result["new_demon_name"]}
-            self.add_log("🏆 游戏结束！善良阵营获胜！恶魔已被消灭", "game_end")
-            self.add_system_log("游戏结束！善良阵营获胜！恶魔已被消灭", "game_end")
-            return {"ended": True, "winner": "good", "reason": "恶魔已被消灭"}
+            return self._finalize_game_end(
+                "good",
+                "恶魔已被消灭",
+                "游戏结束！善良阵营获胜！恶魔已被消灭",
+                "🏆 游戏结束！善良阵营获胜！恶魔已被消灭"
+            )
 
         if allow_mayor_day_end and len(alive_non_travelers) == 3 and not self._had_execution_today() and self._has_active_mayor():
-            self.add_log("🏆 游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜", "game_end")
-            self.add_system_log("游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜", "game_end")
-            return {"ended": True, "winner": "good", "reason": "镇长在三人生还且无人处决时获胜"}
+            return self._finalize_game_end(
+                "good",
+                "镇长在三人生还且无人处决时获胜",
+                "游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜",
+                "🏆 游戏结束！善良阵营获胜！镇长在三人生还且无人处决时获胜"
+            )
 
         if len(alive_non_travelers) <= 2:
-            self.add_log("🏆 游戏结束！邪恶阵营获胜！邪恶势力占领了小镇", "game_end")
-            self.add_system_log("游戏结束！邪恶阵营获胜！邪恶势力占领了小镇", "game_end")
-            return {"ended": True, "winner": "evil", "reason": "邪恶势力占领了小镇"}
+            return self._finalize_game_end(
+                "evil",
+                "邪恶势力占领了小镇",
+                "游戏结束！邪恶阵营获胜！邪恶势力占领了小镇",
+                "🏆 游戏结束！邪恶阵营获胜！邪恶势力占领了小镇"
+            )
 
         return {"ended": False}
     
@@ -2077,14 +2132,22 @@ class Game:
                     distorted["message"] = f"{target_name} 的角色是 {roles[0]} 或 {roles[1] if len(roles) > 1 else roles[0]} 其中之一"
             return distorted
 
-        if info_type == "spy" and isinstance(distorted.get("grimoire"), list):
-            fake_grimoire = []
-            for line in distorted["grimoire"]:
-                player_name = line.split("：")[0] if "：" in line else line
-                fake_role = self._random_other_role_name()
-                fake_grimoire.append(f"{player_name}：{fake_role}")
-            distorted["grimoire"] = fake_grimoire
-            distorted["message"] = "魔典信息：\n" + "\n".join(fake_grimoire)
+        if info_type == "spy":
+            logs = distorted.get("logs")
+            if isinstance(logs, list):
+                fake_logs = [f"[伪造日志] {self._random_other_role_name()} 使用了技能" for _ in logs[:20]]
+                distorted["logs"] = fake_logs
+                distorted["message"] = "日志视图（失真）：\n" + "\n".join(fake_logs) if fake_logs else "日志视图（失真）：暂无可读内容"
+                return distorted
+            if isinstance(distorted.get("grimoire"), list):
+                fake_grimoire = []
+                for line in distorted["grimoire"]:
+                    player_name = line.split("：")[0] if "：" in line else line
+                    fake_role = self._random_other_role_name()
+                    fake_grimoire.append(f"{player_name}：{fake_role}")
+                distorted["grimoire"] = fake_grimoire
+                distorted["message"] = "魔典信息：\n" + "\n".join(fake_grimoire)
+                return distorted
             return distorted
 
         return distorted
@@ -2205,6 +2268,18 @@ class Game:
 
         if isinstance(info, dict):
             info["is_drunk_or_poisoned"] = is_drunk_or_poisoned
+            target_labels = [self._player_label(tp) for tp in target_players]
+            if role_id == "spy":
+                info_message = f"日志视图（{len(info.get('logs') or [])}条）"
+            else:
+                info_message = self._compact_log_text(info.get("message", "无信息"))
+            malfunction_text = "失常信息" if info_malfunctioned else "正常信息"
+            self.add_system_log(
+                f"第{self.night_number}夜 信息技能: {self._player_label(player)} 使用 {role_id}"
+                f"{'，目标: ' + ', '.join(target_labels) if target_labels else ''}，结果: {malfunction_text}，内容: {info_message}",
+                "ability_info"
+            )
+            self.add_log(f"[夜间] {player['name']}({role.get('name', role_id)}) 获得{malfunction_text}", "night")
         return info
     
     def _generate_washerwoman_info(self, player, is_drunk_or_poisoned=False):
@@ -2499,761 +2574,32 @@ class Game:
         }
 
     def _generate_spy_info(self, player, is_drunk_or_poisoned=False):
-        script_roles = []
-        for role_group in self.script.get("roles", {}).values():
-            for r in role_group:
-                if r and r.get("name"):
-                    script_roles.append(r["name"])
-
-        grimoire = []
-        for p in self.players:
-            if is_drunk_or_poisoned and script_roles:
-                shown_role = random.choice(script_roles)
-            else:
-                role_obj = self._get_player_actual_role(p) or {}
-                shown_role = role_obj.get("name", "未知")
-            grimoire.append(f"{p['name']}：{shown_role}")
-
+        visible_logs = []
+        for entry in self.game_log[-80:]:
+            log_type = str(entry.get("type", "info")).lower()
+            raw_message = str(entry.get("message", ""))
+            if log_type in {"ability_info", "night_action", "ability", "player_action"}:
+                continue
+            if "日志视图：" in raw_message:
+                continue
+            compact_message = self._compact_log_text(raw_message)
+            if not compact_message:
+                continue
+            visible_logs.append(f"[{entry.get('time', '--:--:--')}] [{str(entry.get('type', 'info')).upper()}] {compact_message}")
+        if len(visible_logs) > 20:
+            visible_logs = visible_logs[-20:]
+        if not visible_logs:
+            visible_logs = ["暂无日志记录"]
         return {
             "info_type": "spy",
-            "grimoire": grimoire,
-            "message": "魔典信息：\n" + "\n".join(grimoire),
+            "logs": visible_logs,
+            "message": "日志视图：\n" + "\n".join(visible_logs),
             "is_drunk_or_poisoned": is_drunk_or_poisoned
         }
 
 
-# 路由
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/api/scripts', methods=['GET'])
-def get_scripts():
-    """获取所有剧本"""
-    scripts_list = []
-    for script_id, script in SCRIPTS.items():
-        scripts_list.append({
-            "id": script_id,
-            "name": script["name"],
-            "name_en": script["name_en"],
-            "description": script["description"]
-        })
-    return jsonify(scripts_list)
-
-@app.route('/api/script/<script_id>', methods=['GET'])
-def get_script_detail(script_id):
-    """获取剧本详情"""
-    if script_id not in SCRIPTS:
-        return jsonify({"error": "剧本不存在"}), 404
-    return jsonify(SCRIPTS[script_id])
-
-@app.route('/api/role_distribution/<int:player_count>', methods=['GET'])
-def get_distribution(player_count):
-    """获取角色分布"""
-    distribution = get_role_distribution(player_count)
-    return jsonify(distribution)
-
-@app.route('/api/game/create', methods=['POST'])
-def create_game():
-    """创建新游戏"""
-    data = request.json
-    script_id = data.get('script_id')
-    player_count = data.get('player_count')
-    
-    if script_id not in SCRIPTS:
-        return jsonify({"error": "无效的剧本"}), 400
-    
-    if not 5 <= player_count <= 16:
-        return jsonify({"error": "玩家数量必须在5-16之间"}), 400
-    
-    game_id = f"game_{len(games) + 1}_{int(datetime.now().timestamp())}"
-    game = Game(game_id, script_id, player_count)
-    owner_token = secrets.token_urlsafe(24)
-    game.owner_token = owner_token
-    # 简单的自动清理机制：如果游戏数量超过10个，删除最早创建的
-    if len(games) >= 10:
-        # 按创建时间排序（假设game_id包含时间戳或按插入顺序）
-        # Python 3.7+ 字典保持插入顺序，直接删除第一个key即可
-        oldest_game_id = next(iter(games))
-        del games[oldest_game_id]
-
-    games[game_id] = game
-    
-    return jsonify({
-        "success": True,
-        "game_id": game_id,
-        "owner_token": owner_token,
-        "game": game.to_dict()
-    })
-
-@app.route('/api/game/<game_id>', methods=['GET'])
-def get_game(game_id):
-    """获取游戏状态"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    return jsonify(games[game_id].to_dict())
-
-@app.route('/api/game/<game_id>/roles', methods=['GET'])
-def get_game_roles(game_id):
-    """获取游戏可用角色"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    return jsonify(games[game_id].get_available_roles())
-
-@app.route('/api/game/<game_id>/assign_random', methods=['POST'])
-def assign_random_roles(game_id):
-    """随机分配角色"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    player_names = data.get('player_names', [])
-    hide_roles = bool(data.get('hide_roles', False))
-    
-    game = games[game_id]
-    if len(player_names) != game.player_count:
-        return jsonify({"error": f"需要 {game.player_count} 名玩家"}), 400
-    
-    players = game.assign_roles_randomly(player_names)
-    response_players = players
-    if hide_roles:
-        response_players = [{
-            "id": p["id"],
-            "name": p["name"],
-            "connected": p.get("connected", False),
-            "alive": p.get("alive", True)
-        } for p in players]
-    return jsonify({
-        "success": True,
-        "players": response_players
-    })
-
-@app.route('/api/game/<game_id>/assign_manual', methods=['POST'])
-def assign_manual_roles(game_id):
-    """手动分配角色"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    assignments = data.get('assignments', [])
-    
-    game = games[game_id]
-    if len(assignments) != game.player_count:
-        return jsonify({"error": f"需要 {game.player_count} 名玩家"}), 400
-    
-    players = game.assign_roles_manually(assignments)
-    return jsonify({
-        "success": True,
-        "players": players
-    })
-
-@app.route('/api/game/<game_id>/start_night', methods=['POST'])
-def start_night(game_id):
-    """开始夜晚"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    if getattr(game, "mastermind_pending", False):
-        resolution_day = getattr(game, "mastermind_resolution_day", None)
-        if resolution_day is not None and game.day_number >= resolution_day and not game._had_execution_today():
-            game.mastermind_pending = False
-            game.mastermind_resolution_day = None
-            game.mastermind_forced_winner = "good"
-            game.add_log("🏆 游戏结束！善良阵营获胜！主谋延长日无人被处决", "game_end")
-            return jsonify({
-                "success": True,
-                "game_end": {"ended": True, "winner": "good", "reason": "主谋延长日无人被处决"}
-            })
-    game_end_before_night = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
-    if game_end_before_night.get("ended"):
-        return jsonify({
-            "success": True,
-            "game_end": game_end_before_night
-        })
-
-    game.start_night()
-    night_order = game.get_night_order()
-    
-    return jsonify({
-        "success": True,
-        "night_number": game.night_number,
-        "night_order": [{
-            "player_id": item["player"]["id"],
-            "player_name": item["player"]["name"],
-            "role_id": item["role"]["id"],
-            "role_name": item["role"]["name"],
-            "role_type": game._get_role_type(item["role"]),
-            "ability": item["role"]["ability"],
-            "order": item["order"],
-            "action_type": get_night_action_type(item["role"]["id"], game._get_role_type(item["role"]))
-        } for item in night_order],
-        "alive_players": [{"id": p["id"], "name": p["name"]} for p in game.players if p["alive"]]
-    })
-
-@app.route('/api/game/<game_id>/night_action', methods=['POST'])
-def record_night_action(game_id):
-    """记录夜间行动"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    game.record_night_action(
-        data.get('player_id'),
-        data.get('action'),
-        data.get('target'),
-        data.get('result'),
-        data.get('action_type'),  # 新增: kill, protect, info, skip, drunk 等
-        data.get('extra_data')    # 额外数据，如醉酒持续时间
-    )
-    
-    return jsonify({"success": True})
-
-@app.route('/api/game/<game_id>/night_death', methods=['POST'])
-def add_night_death(game_id):
-    """添加夜间死亡"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    game.add_night_death(data.get('player_id'), data.get('cause', '恶魔击杀'))
-    
-    return jsonify({"success": True})
-
-# 更新日期: 2026-01-02 - 添加小恶魔传刀和红唇女郎信息返回
-@app.route('/api/game/<game_id>/start_day', methods=['POST'])
-def start_day(game_id):
-    """开始白天"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    game.start_day()
-    
-    # 检查游戏结束
-    game_end_result = game.check_game_end(apply_scarlet_woman=True)
-    
-    response = {
-        "success": True,
-        "day_number": game.day_number,
-        "night_deaths": game.night_deaths,
-        "game_end": game_end_result
-    }
-    
-    # 添加小恶魔传刀信息
-    if hasattr(game, 'imp_starpass') and game.imp_starpass:
-        response["imp_starpass"] = game.imp_starpass
-    
-    # 添加红唇女郎触发信息
-    if game_end_result.get("scarlet_woman_triggered"):
-        response["scarlet_woman_triggered"] = True
-        response["new_demon_name"] = game_end_result.get("new_demon")
-    
-    return jsonify(response)
-
-@app.route('/api/game/<game_id>/nominate', methods=['POST'])
-def nominate(game_id):
-    """提名"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    result = game.nominate(data.get('nominator_id'), data.get('nominee_id'))
-    
-    return jsonify(result)
-
-@app.route('/api/game/<game_id>/vote', methods=['POST'])
-def vote(game_id):
-    """投票"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    result = game.vote(
-        data.get('nomination_id'),
-        data.get('voter_id'),
-        data.get('vote')
-    )
-    
-    return jsonify(result)
-
-@app.route('/api/game/<game_id>/execute', methods=['POST'])
-# 更新日期: 2026-01-02 - 修复处决后游戏结束检测
-def execute(game_id):
-    """处决"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    result = game.execute(data.get('nomination_id'))
-    
-    # 如果 execute 内部没有设置 game_end，则重新检查
-    if result.get("success") and "game_end" not in result:
-        result["game_end"] = game.check_game_end(apply_scarlet_woman=True)
-    
-    return jsonify(result)
-
-@app.route('/api/game/<game_id>/player_status', methods=['POST'])
-def update_player_status(game_id):
-    """更新玩家状态"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    result = game.update_player_status(
-        data.get('player_id'),
-        data.get('status_type'),
-        data.get('value')
-    )
-    
-    return jsonify(result)
-
-@app.route('/api/game/<game_id>/status', methods=['GET'])
-def get_game_status(game_id):
-    """获取游戏状态"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    return jsonify({
-        "phase": game.current_phase,
-        "day_number": game.day_number,
-        "night_number": game.night_number,
-        "demon_kills": getattr(game, 'demon_kills', []),
-        "protected_players": getattr(game, 'protected_players', []),
-        "night_deaths": getattr(game, 'night_deaths', [])
-    })
-
-@app.route('/api/game/<game_id>/set_red_herring', methods=['POST'])
-def set_red_herring(game_id):
-    """设置占卜师的红鲱鱼"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    target_id = data.get('target_id')
-    
-    # 找到占卜师
-    fortune_teller = next((p for p in game.players if p.get("role") and p["role"].get("id") == "fortune_teller"), None)
-    if not fortune_teller:
-        return jsonify({"error": "场上没有占卜师"}), 400
-    
-    # 找到目标玩家
-    target = next((p for p in game.players if p["id"] == target_id), None)
-    if not target:
-        return jsonify({"error": "无效的目标玩家"}), 400
-    
-    # 检查目标是否是善良阵营
-    if target["role_type"] not in ["townsfolk", "outsider"]:
-        return jsonify({"error": "红鲱鱼必须是善良玩家"}), 400
-    
-    fortune_teller["red_herring_id"] = target_id
-    game.add_log(f"占卜师的红鲱鱼已设置为 {target['name']}", "setup")
-    
-    return jsonify({"success": True, "red_herring": target["name"]})
-
-@app.route('/api/game/<game_id>/mayor_substitute', methods=['POST'])
-def mayor_substitute(game_id):
-    """镇长替死处理"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    substitute_id = data.get('substitute_id')  # 替死的玩家ID，如果为None则镇长自己死
-    
-    # 找到镇长
-    mayor = next((p for p in game.players if p.get("role") and p["role"].get("id") == "mayor"), None)
-    if not mayor:
-        return jsonify({"error": "场上没有镇长"}), 400
-    
-    death_lists = [game.night_deaths]
-    if getattr(game, "_pre_process_results", None):
-        death_lists.append(game._pre_process_results)
-    if not any(any(d.get("mayor_targeted") and d.get("player_id") == mayor["id"] for d in deaths) for deaths in death_lists):
-        if game.current_phase == "night" and getattr(game, "demon_kills", None):
-            if not getattr(game, "_night_kills_processed", False):
-                game._pre_process_results = game.process_night_kills()
-                game._night_kills_processed = True
-            if getattr(game, "_pre_process_results", None):
-                death_lists.append(game._pre_process_results)
-
-    mayor_target_death = None
-    for deaths in death_lists:
-        mayor_target_death = next((d for d in deaths if d.get("mayor_targeted") and d.get("player_id") == mayor["id"]), None)
-        if mayor_target_death:
-            break
-
-    if not mayor_target_death:
-        return jsonify({
-            "success": True,
-            "auto_processed": True,
-            "message": "镇长替死已并入夜间自动结算，无需手动处理",
-            "substitute": None
-        })
-
-    if substitute_id:
-        substitute = next((p for p in game.players if p["id"] == substitute_id), None)
-        if not substitute:
-            return jsonify({"error": "无效的替死玩家"}), 400
-        
-        # 替死玩家死亡，镇长存活
-        mayor_target_death["player_id"] = substitute_id
-        mayor_target_death["player_name"] = substitute["name"]
-        mayor_target_death["cause"] = "镇长替死"
-        mayor_target_death.pop("mayor_targeted", None)
-        
-        game.add_log(f"镇长 {mayor['name']} 的能力触发，{substitute['name']} 替镇长死亡", "night")
-        return jsonify({"success": True, "substitute": substitute["name"]})
-    else:
-        # 镇长自己死亡
-        mayor_target_death.pop("mayor_targeted", None)
-        
-        game.add_log(f"镇长 {mayor['name']} 选择不使用替死能力", "night")
-        return jsonify({"success": True, "substitute": None})
-
-# 更新日期: 2026-01-05 - 获取驱魔人之前选过的目标
-@app.route('/api/game/<game_id>/exorcist_targets', methods=['GET'])
-def get_exorcist_targets(game_id):
-    """获取驱魔人之前选过的目标"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    previous_targets = getattr(game, 'exorcist_previous_targets', [])
-    
-    return jsonify({
-        "previous_targets": previous_targets
-    })
-
-# 更新日期: 2026-01-05 - 获取珀的状态（是否可以杀三人）
-@app.route('/api/game/<game_id>/po_status', methods=['GET'])
-def get_po_status(game_id):
-    """获取珀的能力状态"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    # 检查是否有珀
-    po = next((p for p in game.players if p.get("role") and p["role"].get("id") == "po" and p["alive"]), None)
-    
-    if po:
-        can_kill_three = getattr(game, 'po_skipped_last_night', False)
-        return jsonify({
-            "has_po": True,
-            "po_id": po["id"],
-            "po_name": po["name"],
-            "can_kill_three": can_kill_three
-        })
-    else:
-        return jsonify({
-            "has_po": False
-        })
-
-# 更新日期: 2026-01-05 - 获取沙巴洛斯可复活的目标列表
-@app.route('/api/game/<game_id>/shabaloth_revive_targets', methods=['GET'])
-def get_shabaloth_revive_targets(game_id):
-    """获取沙巴洛斯可以复活的目标"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    # 获取所有死亡的玩家（可以复活）
-    dead_players = [{"id": p["id"], "name": p["name"]} for p in game.players if not p["alive"]]
-    
-    return jsonify({
-        "dead_players": dead_players
-    })
-
-# 更新日期: 2026-01-05 - 获取恶魔代言人之前选过的目标
-@app.route('/api/game/<game_id>/devils_advocate_targets', methods=['GET'])
-def get_devils_advocate_targets(game_id):
-    """获取恶魔代言人之前选过的目标"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    previous_targets = getattr(game, 'devils_advocate_previous_targets', [])
-    
-    return jsonify({
-        "previous_targets": previous_targets
-    })
-
-# 更新日期: 2026-01-05 - 和平主义者决定是否让玩家存活
-@app.route('/api/game/<game_id>/pacifist_decision', methods=['POST'])
-def pacifist_decision(game_id):
-    """和平主义者决定是否让善良玩家存活"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    
-    nomination_id = data.get('nomination_id')
-    player_survives = data.get('survives', False)  # True = 玩家存活, False = 玩家死亡
-    
-    nomination = next((n for n in game.nominations if n["id"] == nomination_id), None)
-    if not nomination:
-        return jsonify({"error": "无效的提名"}), 400
-    
-    nominee = next((p for p in game.players if p["id"] == nomination["nominee_id"]), None)
-    if not nominee:
-        return jsonify({"error": "无效的被提名者"}), 400
-    
-    if player_survives:
-        # 和平主义者保护玩家存活
-        nomination["status"] = "pacifist_saved"
-        game.add_log(f"☮️ {nominee['name']} 原本会被处决，但和平主义者的能力使其存活", "execution")
-        return jsonify({
-            "success": True,
-            "executed": False,
-            "pacifist_saved": True,
-            "player": nominee
-        })
-    else:
-        # 说书人选择让玩家死亡
-        nominee["alive"] = False
-        nomination["status"] = "executed"
-        game.executions.append({
-            "day": game.day_number,
-            "executed_id": nominee["id"],
-            "executed_name": nominee["name"],
-            "vote_count": nomination["vote_count"]
-        })
-        game.add_log(f"{nominee['name']} 被处决（和平主义者未能阻止）", "execution")
-        
-        # 检查游戏结束
-        result = {"success": True, "executed": True, "player": nominee}
-        if nominee.get("role_type") == "demon":
-            game_end = game.check_game_end(apply_scarlet_woman=True)
-            result["game_end"] = game_end
-        
-        return jsonify(result)
-
-# 更新日期: 2026-01-05 - 月之子选择目标
-@app.route('/api/game/<game_id>/moonchild_ability', methods=['POST'])
-def moonchild_ability(game_id):
-    """月之子选择目标"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    moonchild_id = data.get('moonchild_id')
-    target_id = data.get('target_id')
-    
-    # 找到月之子
-    moonchild = next((p for p in game.players if p["id"] == moonchild_id), None)
-    if not moonchild:
-        return jsonify({"error": "无效的月之子玩家"}), 400
-    
-    # 检查是否是月之子角色
-    if not moonchild.get("role") or moonchild["role"].get("id") != "moonchild":
-        return jsonify({"error": "该玩家不是月之子"}), 400
-    
-    # 清除触发标记
-    moonchild["moonchild_triggered"] = False
-    game.pending_moonchild = None
-    
-    # 如果没有选择目标，则放弃能力
-    if not target_id:
-        game.add_log(f"🌙 月之子 {moonchild['name']} 选择不使用能力", "game_event")
-        return jsonify({"success": True, "used": False})
-    
-    # 找到目标
-    target = next((p for p in game.players if p["id"] == target_id), None)
-    if not target:
-        return jsonify({"error": "无效的目标玩家"}), 400
-    
-    # 检查目标是否存活
-    if not target["alive"]:
-        return jsonify({"error": "目标玩家已死亡"}), 400
-    
-    # 检查目标是否是善良的
-    target_is_good = target.get("role_type") in ["townsfolk", "outsider"]
-    
-    if target_is_good:
-        # 善良玩家被选中，死亡
-        target["alive"] = False
-        game.add_log(f"🌙 月之子 {moonchild['name']} 选择了 {target['name']}（善良玩家），{target['name']} 死亡！", "death")
-        
-        # 检查游戏结束
-        game_end = game.check_game_end(apply_scarlet_woman=True)
-        
-        return jsonify({
-            "success": True,
-            "used": True,
-            "target_died": True,
-            "target_name": target["name"],
-            "game_end": game_end
-        })
-    else:
-        # 邪恶玩家被选中，不死亡
-        game.add_log(f"🌙 月之子 {moonchild['name']} 选择了 {target['name']}（邪恶玩家），目标存活", "game_event")
-        return jsonify({
-            "success": True,
-            "used": True,
-            "target_died": False,
-            "target_name": target["name"]
-        })
-
-# 更新日期: 2026-01-05 - 检查是否有待处理的月之子
-@app.route('/api/game/<game_id>/check_moonchild', methods=['GET'])
-def check_moonchild(game_id):
-    """检查是否有月之子需要选择目标"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    pending_id = getattr(game, 'pending_moonchild', None)
-    if pending_id:
-        moonchild = next((p for p in game.players if p["id"] == pending_id), None)
-        if moonchild and moonchild.get("moonchild_triggered"):
-            alive_players = [{"id": p["id"], "name": p["name"]} for p in game.players if p["alive"]]
-            return jsonify({
-                "has_moonchild": True,
-                "moonchild_id": pending_id,
-                "moonchild_name": moonchild["name"],
-                "alive_players": alive_players
-            })
-    
-    return jsonify({"has_moonchild": False})
-
-# 更新日期: 2026-01-05 - 处理莽夫被选中的效果
-@app.route('/api/game/<game_id>/goon_effect', methods=['POST'])
-def goon_effect(game_id):
-    """检查并应用莽夫效果"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    data = request.json
-    game = games[game_id]
-    selector_id = data.get('selector_id')  # 选择莽夫的玩家
-    goon_id = data.get('goon_id')  # 莽夫的ID
-    
-    # 找到莽夫
-    goon = next((p for p in game.players if p["id"] == goon_id), None)
-    if not goon or goon.get("role", {}).get("id") != "goon":
-        return jsonify({"error": "无效的莽夫玩家"}), 400
-    
-    # 找到选择者
-    selector = next((p for p in game.players if p["id"] == selector_id), None)
-    if not selector:
-        return jsonify({"error": "无效的选择者"}), 400
-    
-    # 检查莽夫今晚是否已被选择
-    if getattr(game, 'goon_chosen_tonight', False):
-        return jsonify({
-            "success": True,
-            "already_chosen": True,
-            "message": "莽夫今晚已被其他玩家选择"
-        })
-    
-    # 标记莽夫今晚已被选择
-    game.goon_chosen_tonight = True
-    
-    # 检查莽夫是否醉酒/中毒
-    goon_affected = goon.get("drunk") or goon.get("poisoned")
-    
-    result = {
-        "success": True,
-        "goon_name": goon["name"],
-        "selector_name": selector["name"],
-        "already_chosen": False
-    }
-    
-    if not goon_affected:
-        # 选择者醉酒到明天黄昏
-        selector["drunk"] = True
-        selector["drunk_until"] = {
-            "day": game.day_number + 1,
-            "night": game.night_number + 1
-        }
-        
-        # 莽夫改变阵营为选择者的阵营
-        selector_alignment = selector.get("role_type")
-        if selector_alignment in ["townsfolk", "outsider"]:
-            goon["goon_alignment"] = "good"
-            result["new_alignment"] = "善良"
-        else:
-            goon["goon_alignment"] = "evil"
-            result["new_alignment"] = "邪恶"
-        
-        game.add_log(f"💪 {selector['name']} 选择了莽夫 {goon['name']}，{selector['name']} 喝醉了，莽夫变为{result['new_alignment']}阵营", "night")
-        result["selector_drunk"] = True
-        result["alignment_changed"] = True
-    else:
-        game.add_log(f"💪 {selector['name']} 选择了莽夫 {goon['name']}（莽夫醉酒/中毒，能力无效）", "night")
-        result["selector_drunk"] = False
-        result["alignment_changed"] = False
-    
-    return jsonify(result)
-
-# 更新日期: 2026-01-08 - 麻脸巫婆获取可变更角色列表
-@app.route('/api/game/<game_id>/pit_hag_roles', methods=['GET'])
-def get_pit_hag_roles(game_id):
-    """获取麻脸巫婆可以选择的角色列表（不在场的角色）"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    # 获取当前场上所有角色
-    current_role_ids = set()
-    for p in game.players:
-        if p.get("role"):
-            current_role_ids.add(p["role"].get("id"))
-    
-    # 获取剧本中所有可用角色（不在场的）
-    available_roles = []
-    for role_type in ["townsfolk", "outsider", "minion", "demon"]:
-        for role in game.script["roles"].get(role_type, []):
-            if role["id"] not in current_role_ids:
-                available_roles.append({
-                    "id": role["id"],
-                    "name": role["name"],
-                    "type": role_type,
-                    "ability": role.get("ability", "")
-                })
-    
-    return jsonify({
-        "available_roles": available_roles,
-        "current_roles": list(current_role_ids)
-    })
-
-
-# ==================== 游戏代码 API ====================
-
-@app.route('/api/game/<game_id>/code', methods=['GET'])
-def get_game_code(game_id):
-    """获取游戏代码（用于玩家加入）"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    # 返回游戏ID的简短版本作为代码
-    parts = game_id.split('_')
-    if len(parts) >= 3:
-        short_code = parts[-1][-6:]
-    else:
-        short_code = game_id[-8:]
-    
-    return jsonify({
-        "game_id": game_id,
-        "short_code": short_code,
-        "full_code": game_id
-    })
+app.register_blueprint(game_routes_bp)
+init_game_routes(games, SCRIPTS, Game, get_role_distribution, get_night_action_type)
 
 
 if __name__ == '__main__':

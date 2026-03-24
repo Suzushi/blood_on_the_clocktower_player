@@ -97,13 +97,20 @@ def _send_night_result_auto(game, player_id, info):
         {"result_type": result_type, "result_data": result_data}
     )
 
+def _can_skip_night_action(game, role_id, role_type):
+    script_id = getattr(game, "script_id", "")
+    if script_id == "trouble_brewing":
+        return role_id == "spy" or role_id == "imp"
+    return True
+
 def _build_auto_action_config(game, player, role, action_type):
     role_id = role.get("id", "")
+    role_type = role.get("type", "")
     config = {
         "max_targets": 1,
         "min_targets": 1,
         "unique_targets": True,
-        "can_skip": True,
+        "can_skip": _can_skip_night_action(game, role_id, role_type),
         "use_alive_only": True,
         "description": role.get("ability", "")
     }
@@ -128,6 +135,11 @@ def _build_auto_action_config(game, player, role, action_type):
             config["is_info"] = True
             config["min_targets"] = 0
             config["max_targets"] = 0
+        elif role_id == "spy":
+            config["can_select"] = True
+            config["min_targets"] = 0
+            config["max_targets"] = 0
+            config["description"] = "你可以查看本局当前日志，或选择跳过"
         else:
             config["can_select"] = True
             if role_id in ["fortune_teller", "chambermaid", "seamstress"]:
@@ -135,6 +147,7 @@ def _build_auto_action_config(game, player, role, action_type):
                 config["min_targets"] = 2
             if role_id == "fortune_teller":
                 config["use_alive_only"] = False
+                config["can_skip"] = False
     else:
         config["can_select"] = False
         config["min_targets"] = 0
@@ -312,7 +325,6 @@ def _run_auto_night_loop(game):
         if getattr(game, "auto_night_running", False):
             return
         game.auto_night_running = True
-        game.auto_storyteller_enabled = True
         game.auto_night_started_at = time.time()
         game.current_night_index = 0
         game.pending_actions = {}
@@ -322,7 +334,7 @@ def _run_auto_night_loop(game):
         if game.night_number == 1:
             _send_first_night_intro(game)
 
-        auto_info_roles = {"washerwoman", "librarian", "investigator", "chef", "clockmaker", "empath", "undertaker", "oracle", "flowergirl", "spy"}
+        auto_info_roles = {"washerwoman", "librarian", "investigator", "chef", "clockmaker", "empath", "undertaker", "oracle", "flowergirl"}
         night_order = game.get_night_order()
         for idx, item in enumerate(night_order):
             if game.current_phase != "night":
@@ -374,7 +386,6 @@ def _run_auto_night_loop(game):
         if game.current_phase == "night":
             game.start_day()
             game.check_game_end(apply_scarlet_woman=True)
-            game.add_log("[系统] 夜晚结算完成，自动进入白天", "phase")
     finally:
         game.auto_night_running = False
 
@@ -558,7 +569,12 @@ def _submit_pending_action_choice(game, player, pending, targets, extra_data=Non
     if skipped:
         game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 选择跳过行动", "player_action")
     else:
-        game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 选择了 {', '.join(target_names)}", "player_action")
+        if target_names:
+            game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 选择了 {', '.join(target_names)}", "player_action")
+        elif pending.get("role_id") == "spy":
+            game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 执行了日志查看", "player_action")
+        else:
+            game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 提交了无目标行动", "player_action")
 
 
 # ==================== 页面路由 ====================
@@ -861,6 +877,7 @@ def get_night_action_config(role_id, role_type, game, player_id):
         "type": "other",
         "role_id": role_id,
         "can_select": False,
+        "can_skip": _can_skip_night_action(game, role_id, role_type),
         "targets": [],
         "min_targets": 0,
         "max_targets": 1,
@@ -909,6 +926,7 @@ def get_night_action_config(role_id, role_type, game, player_id):
     elif role_id == "fortune_teller":
         config["type"] = "fortune_tell"
         config["can_select"] = True
+        config["can_skip"] = False
         config["targets"] = all_players_with_self
         config["min_targets"] = 2
         config["max_targets"] = 2
@@ -944,9 +962,11 @@ def get_night_action_config(role_id, role_type, game, player_id):
         config["description"] = "选择你的主人（只能跟随主人投票）"
     
     elif role_id == "spy":
-        config["type"] = "info"
-        config["can_select"] = False
-        config["description"] = "你可以查看魔典（说书人会告知信息）"
+        config["type"] = "info_select"
+        config["can_select"] = True
+        config["min_targets"] = 0
+        config["max_targets"] = 0
+        config["description"] = "你可以查看本局当前日志，或选择跳过"
     elif role_id == "grandmother":
         config["type"] = "grandchild_select"
         config["can_select"] = True
@@ -1068,9 +1088,14 @@ def player_night_action():
     
     game.player_night_choices[player_id] = choice
     
-    # 添加日志（仅对说书人可见）
-    if normalized_targets:
+    if extra_data.get("skipped", False):
+        game.add_log(f"[玩家选择] {player['name']} ({choice['role_name']}) 选择跳过行动", "player_action")
+    elif normalized_targets:
         game.add_log(f"[玩家选择] {player['name']} ({choice['role_name']}) 选择了 {', '.join(target_names)}", "player_action")
+    elif choice.get("role_id") == "spy":
+        game.add_log(f"[玩家选择] {player['name']} ({choice['role_name']}) 执行了日志查看", "player_action")
+    else:
+        game.add_log(f"[玩家选择] {player['name']} ({choice['role_name']}) 提交了无目标行动", "player_action")
     
     return jsonify({
         "success": True,
@@ -1385,158 +1410,6 @@ def mark_messages_read(game_id, player_id):
     return jsonify({"success": True})
 
 
-# ==================== 说书人发送消息 API ====================
-
-@player_bp.route('/api/storyteller/send_message', methods=['POST'])
-def send_message_to_player():
-    """说书人向玩家发送信息（如角色信息、查验结果等）"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    message_type = data.get('type', 'info')  # info, night_result, warning, etc.
-    content = data.get('content', '')
-    title = data.get('title', '来自说书人的信息')
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    
-    # 初始化消息队列
-    if "messages" not in player:
-        player["messages"] = []
-    
-    # 创建消息
-    message = {
-        "id": f"msg_{datetime.now().timestamp()}",
-        "type": message_type,
-        "title": title,
-        "content": content,
-        "time": datetime.now().isoformat(),
-        "read": False
-    }
-    
-    player["messages"].append(message)
-    
-    # 保留最近50条消息
-    if len(player["messages"]) > 50:
-        player["messages"] = player["messages"][-50:]
-    
-    return jsonify({
-        "success": True,
-        "message_id": message["id"]
-    })
-
-
-@player_bp.route('/api/storyteller/send_night_result', methods=['POST'])
-def send_night_result():
-    """说书人发送夜间行动结果"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    result_type = data.get('result_type')  # number, role, yes_no, players, etc.
-    result_data = data.get('result_data')
-    is_fake = data.get('is_fake', False)  # 是否是假信息（醉酒/中毒时）
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    
-    # 初始化消息队列
-    if "messages" not in player:
-        player["messages"] = []
-    
-    # 根据结果类型生成描述
-    role_name = player.get("role", {}).get("name", "你的角色")
-    
-    if result_type == "info":
-        # 直接使用传入的信息文本
-        content = str(result_data)
-    elif result_type == "number":
-        content = f"你得到的数字是: {result_data}"
-    elif result_type == "yes_no":
-        content = f"结果是: {'是' if result_data else '否'}"
-    elif result_type == "role":
-        content = f"该玩家的角色是: {result_data}"
-    elif result_type == "players":
-        if isinstance(result_data, list):
-            content = f"相关玩家: {', '.join(result_data)}"
-        else:
-            content = str(result_data)
-    else:
-        content = str(result_data)
-    
-    message = {
-        "id": f"result_{datetime.now().timestamp()}",
-        "type": "night_result",
-        "title": f"🌙 {role_name}的夜间信息",
-        "content": content,
-        "result_type": result_type,
-        "result_data": result_data,
-        "time": datetime.now().isoformat(),
-        "read": False
-    }
-    
-    player["messages"].append(message)
-    
-    # 清除玩家的夜间选择（已处理）
-    if hasattr(game, 'player_night_choices') and player_id in game.player_night_choices:
-        game.player_night_choices[player_id]["confirmed"] = True
-    
-    # 同时清除待处理行动，防止玩家端轮询时重新显示等待面板覆盖消息
-    if hasattr(game, 'pending_actions') and player_id in game.pending_actions:
-        game.pending_actions[player_id]["status"] = "confirmed"
-    
-    return jsonify({
-        "success": True,
-        "message_id": message["id"]
-    })
-
-
-# ==================== 说书人获取玩家选择 API ====================
-
-@player_bp.route('/api/storyteller/player_choices/<game_id>', methods=['GET'])
-def get_player_choices(game_id):
-    """获取所有玩家的夜间选择（供说书人查看）"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    choices = getattr(game, 'player_night_choices', {})
-    
-    return jsonify({
-        "choices": choices
-    })
-
-
-@player_bp.route('/api/storyteller/confirm_action', methods=['POST'])
-def confirm_player_action():
-    """说书人确认玩家的夜间行动"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    if hasattr(game, 'player_night_choices') and player_id in game.player_night_choices:
-        game.player_night_choices[player_id]["confirmed"] = True
-        return jsonify({"success": True})
-    
-    return jsonify({"error": "未找到该玩家的选择"}), 400
-
-
 # ==================== 玩家连接状态 API ====================
 
 @player_bp.route('/api/player/heartbeat', methods=['POST'])
@@ -1562,131 +1435,6 @@ def player_heartbeat():
     player["last_seen"] = datetime.now().isoformat()
     
     return jsonify({"success": True})
-
-
-@player_bp.route('/api/storyteller/player_status/<game_id>', methods=['GET'])
-def get_players_connection_status(game_id):
-    """获取所有玩家的连接状态"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    players_status = []
-    for p in game.players:
-        last_seen = p.get("last_seen")
-        is_online = False
-        
-        if last_seen:
-            try:
-                last_dt = datetime.fromisoformat(last_seen)
-                # 10秒内有心跳认为在线
-                is_online = (datetime.now() - last_dt).total_seconds() < 10
-            except:
-                pass
-        
-        players_status.append({
-            "id": p["id"],
-            "name": p["name"],
-            "connected": p.get("connected", False),
-            "online": is_online,
-            "last_seen": last_seen
-        })
-    
-    return jsonify({
-        "players": players_status
-    })
-
-
-# ==================== 行动通知 API ====================
-# 更新日期: 2026-01-12 - 说书人推送行动请求给玩家
-
-@player_bp.route('/api/storyteller/notify_action', methods=['POST'])
-def notify_player_action():
-    """说书人通知玩家执行行动"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    action_type = data.get('action_type')  # night_action, day_action
-    action_config = data.get('action_config', {})  # 行动配置
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    
-    # 初始化待处理行动
-    if not hasattr(game, 'pending_actions'):
-        game.pending_actions = {}
-    
-    # 获取存活玩家列表作为可选目标
-    alive_players = [
-        {"id": p["id"], "name": p["name"]} 
-        for p in game.players 
-        if p.get("alive", True) and p["id"] != player_id
-    ]
-    
-    all_players = [
-        {"id": p["id"], "name": p["name"]} 
-        for p in game.players 
-        if p["id"] != player_id
-    ]
-    
-    # 占卜师等角色可以选择包括自己在内的所有玩家
-    all_players_with_self = [
-        {"id": p["id"], "name": p["name"]} 
-        for p in game.players
-    ]
-    
-    # 构建行动请求
-    role = player.get("role", {})
-    role_id = role.get("id", "")
-    role_name = role.get("name", "未知角色")
-    
-    # 占卜师可以选择包括自己在内的任何玩家
-    include_self_roles = ["fortune_teller"]
-    if role_id in include_self_roles and not action_config.get("use_alive_only", True):
-        target_list = all_players_with_self
-    elif action_config.get("use_alive_only", True):
-        target_list = alive_players
-    else:
-        target_list = all_players
-    
-    pending_action = {
-        "player_id": player_id,
-        "player_name": player["name"],
-        "role_id": role_id,
-        "role_name": role_name,
-        "action_type": action_type,
-        "phase": game.current_phase,
-        "config": action_config,
-        "targets": target_list,
-        "min_targets": action_config.get("min_targets", 1),
-        "max_targets": action_config.get("max_targets", 1),
-        "unique_targets": action_config.get("unique_targets", True),
-        "can_skip": action_config.get("can_skip", True),
-        "description": action_config.get("description", role.get("ability", "")),
-        "created_at": datetime.now().isoformat(),
-        "status": "pending",
-        "choice": None
-    }
-    
-    game.pending_actions[player_id] = pending_action
-    
-    # 清除之前的选择
-    if hasattr(game, 'player_night_choices') and player_id in game.player_night_choices:
-        del game.player_night_choices[player_id]
-    
-    game.add_log(f"[系统] 等待 {player['name']} ({role_name}) 进行行动选择", "info")
-    
-    return jsonify({
-        "success": True,
-        "pending_action": pending_action
-    })
 
 
 @player_bp.route('/api/player/pending_action/<game_id>/<int:player_id>', methods=['GET'])
@@ -1899,125 +1647,6 @@ def ravenkeeper_choose():
     })
 
 
-@player_bp.route('/api/storyteller/clear_pending_action', methods=['POST'])
-def clear_pending_action():
-    """说书人清除玩家的待处理行动"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    if hasattr(game, 'pending_actions') and player_id in game.pending_actions:
-        del game.pending_actions[player_id]
-    
-    return jsonify({"success": True})
-
-
-@player_bp.route('/api/storyteller/night_progress/<game_id>', methods=['GET'])
-def get_night_progress(game_id):
-    """获取夜间行动进度（说书人用，包含所有玩家提交状态）"""
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-
-    game = games[game_id]
-    choices = getattr(game, 'player_night_choices', {})
-    pending = getattr(game, 'pending_actions', {})
-
-    submitted = {}
-    for pid, choice in choices.items():
-        submitted[pid] = {
-            "player_name": choice.get("player_name"),
-            "role_name": choice.get("role_name"),
-            "targets": choice.get("targets", []),
-            "target_names": choice.get("target_names", []),
-            "extra_data": choice.get("extra_data", {}),
-            "skipped": choice.get("skipped", False),
-            "confirmed": choice.get("confirmed", False),
-            "submitted_at": choice.get("submitted_at")
-        }
-
-    pending_status = {}
-    for pid, action in pending.items():
-        pending_status[pid] = {
-            "status": action.get("status", "pending"),
-            "role_name": action.get("role_name"),
-            "player_name": action.get("player_name"),
-            "has_choice": action.get("choice") is not None
-        }
-
-    return jsonify({
-        "submitted_choices": submitted,
-        "pending_actions": pending_status,
-        "phase": game.current_phase,
-        "night_number": game.night_number
-    })
-
-
-# ==================== 白天行动 API ====================
-
-@player_bp.route('/api/storyteller/notify_day_action', methods=['POST'])
-def notify_day_action():
-    """说书人通知玩家执行白天行动（如杀手）"""
-    data = request.json
-    game_id = data.get('game_id')
-    player_id = data.get('player_id')
-    action_config = data.get('action_config', {})
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    
-    # 初始化待处理行动
-    if not hasattr(game, 'pending_actions'):
-        game.pending_actions = {}
-    
-    # 获取存活玩家列表
-    alive_players = [
-        {"id": p["id"], "name": p["name"]} 
-        for p in game.players 
-        if p.get("alive", True) and p["id"] != player_id
-    ]
-    
-    role = player.get("role", {})
-    role_id = role.get("id", "")
-    role_name = role.get("name", "未知角色")
-    
-    pending_action = {
-        "player_id": player_id,
-        "player_name": player["name"],
-        "role_id": role_id,
-        "role_name": role_name,
-        "action_type": "day_action",
-        "phase": "day",
-        "config": action_config,
-        "targets": alive_players,
-        "max_targets": action_config.get("max_targets", 1),
-        "can_skip": action_config.get("can_skip", True),
-        "description": action_config.get("description", role.get("ability", "")),
-        "created_at": datetime.now().isoformat(),
-        "status": "pending",
-        "choice": None
-    }
-    
-    game.pending_actions[player_id] = pending_action
-    
-    game.add_log(f"[系统] {player['name']} ({role_name}) 正在进行白天行动", "info")
-    
-    return jsonify({
-        "success": True,
-        "pending_action": pending_action
-    })
-
-
 @player_bp.route('/api/player/day_action/<game_id>/<int:player_id>', methods=['GET'])
 def get_day_action(game_id, player_id):
     """玩家获取待处理的白天行动"""
@@ -2135,8 +1764,7 @@ def submit_pit_hag_action():
             "target_old_role": target.get("role", {}).get("name", "未知")
         },
         "submitted_at": datetime.now().isoformat(),
-        "confirmed": False,
-        "requires_storyteller_decision": new_role_type == "demon"  # 恶魔需要说书人决定
+        "confirmed": False
     }
     
     # 更新pending_actions状态
@@ -2274,79 +1902,4 @@ def server_health():
         "total_players": total_players,
         "online_players": online_players,
         "version": "1.0.0"
-    })
-
-
-@player_bp.route('/api/storyteller/confirm_pit_hag', methods=['POST'])
-def confirm_pit_hag_action():
-    """说书人确认麻脸巫婆的行动（特别是创造恶魔时）"""
-    data = request.json
-    game_id = data.get('game_id')
-    pit_hag_player_id = data.get('pit_hag_player_id')
-    allow_demon_survive = data.get('allow_demon_survive', False)  # 是否让新恶魔存活
-    
-    if game_id not in games:
-        return jsonify({"error": "游戏不存在"}), 404
-    
-    game = games[game_id]
-    
-    if not hasattr(game, 'player_night_choices') or pit_hag_player_id not in game.player_night_choices:
-        return jsonify({"error": "未找到麻脸巫婆的选择"}), 400
-    
-    choice = game.player_night_choices[pit_hag_player_id]
-    extra = choice.get("extra_data", {})
-    
-    if extra.get("role_in_play"):
-        # 角色在场，无事发生
-        choice["confirmed"] = True
-        game.add_log(f"[夜间] 麻脸巫婆的能力无效（选择的角色已在场）", "night")
-        return jsonify({
-            "success": True,
-            "effect": "no_effect",
-            "message": "角色已在场，无事发生"
-        })
-    
-    # 执行角色转换
-    target_id = choice["targets"][0]
-    target = next((p for p in game.players if p["id"] == target_id), None)
-    
-    if target:
-        old_role_name = target.get("role", {}).get("name", "未知")
-        new_role_id = extra.get("new_role_id")
-        new_role_name = extra.get("new_role_name")
-        new_role_type = extra.get("new_role_type")
-        
-        # 获取完整角色信息
-        new_role = None
-        for role_type in ["townsfolk", "outsider", "minion", "demon"]:
-            for role in game.script["roles"].get(role_type, []):
-                if role["id"] == new_role_id:
-                    new_role = role
-                    break
-            if new_role:
-                break
-        
-        if new_role:
-            target["role"] = new_role
-            target["role_type"] = game._get_role_type(new_role)
-            if hasattr(game, "reconcile_player_role_types"):
-                game.reconcile_player_role_types("麻脸巫婆结算")
-            
-            if extra.get("is_demon"):
-                game.add_log(f"[夜间] 麻脸巫婆将 {target['name']} 从 {old_role_name} 变为 {new_role_name}（新恶魔）", "night")
-                if not allow_demon_survive:
-                    # 说书人选择让新恶魔死亡
-                    # 这里不直接杀死，而是标记需要处理
-                    choice["demon_killed"] = True
-                    game.add_log(f"[夜间] 说书人决定：新恶魔今晚死亡", "night")
-            else:
-                game.add_log(f"[夜间] 麻脸巫婆将 {target['name']} 从 {old_role_name} 变为 {new_role_name}", "night")
-    
-    choice["confirmed"] = True
-    
-    return jsonify({
-        "success": True,
-        "effect": "role_changed",
-        "is_demon": extra.get("is_demon", False),
-        "demon_survives": allow_demon_survive if extra.get("is_demon") else None
     })

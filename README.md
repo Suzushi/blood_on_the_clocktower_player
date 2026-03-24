@@ -2,12 +2,12 @@
 
 这是一个基于 Web 的《血染钟楼》（Blood on the Clocktower）桌面游戏。它旨在提供一个线上游戏环境，让玩家能够在不依赖线下游戏环境的情况下，与其他玩家互动。
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![Flask](https://img.shields.io/badge/Backend-Flask-green.svg)
-![Version](https://img.shields.io/badge/Version-v1.0.1-blue.svg)
-![Status](https://img.shields.io/badge/Status-Phase1%20Complete-brightgreen.svg)
+!\[Python]\(<https://img.shields.io/badge/Python-3.8+-blue.svg> null)
+!\[Flask]\(<https://img.shields.io/badge/Backend-Flask-green.svg> null)
+!\[Version]\(<https://img.shields.io/badge/Version-v1.0.1-blue.svg> null)
+!\[Status]\(<https://img.shields.io/badge/Status-Phase1%20Complete-brightgreen.svg> null)
 
-**当前版本**：v1.0.1 | **最后更新**：2026-03-11
+**当前版本**：v1.0.2 | **最后更新**：2026-03-24
 
 ## ✨ 核心功能
 
@@ -24,9 +24,8 @@
   - 自动处理复活、死亡、更改状态。
 - **🧩 代码结构升级**：
   - 平衡参数已独立到 `config/balance.py`。
-  - 路由开始拆分至 `routes/`（首批 gameplay 蓝图已落地）。
+  - 路由统一收敛到玩家端接口链路。
   - 信息生成逻辑开始下沉至 `services/`，便于后续多剧本扩展。
-
 
 ## 🚀 快速开始
 
@@ -38,47 +37,42 @@
 
 1. **克隆或下载本项目**到本地。
 2. **安装依赖库**：
-    打开终端（CMD 或 PowerShell），进入项目根目录，运行：
-
-    ```bash
-    pip install -r requirements.txt
-    ```
+   打开终端（CMD 或 PowerShell），进入项目根目录，运行：
+   ```bash
+   pip install -r requirements.txt
+   ```
 
 ### 启动游戏
 
 1. **运行程序**：
-
-    ```bash
-    python main.py
-    ```
-
+   ```bash
+   python main.py
+   ```
 2. **访问界面**：
-    打开浏览器，访问地址：`http://127.0.0.1:5000/player`
-    
-    您将看到一个玩家端界面，用于与其他玩家互动。
-    玩家可以自由创建游戏房间，也可以加入已有的游戏房间。
+   打开浏览器，访问地址：`http://127.0.0.1:5000/player`
 
+   您将看到一个玩家端界面，用于与其他玩家互动。
+   玩家可以自由创建游戏房间，也可以加入已有的游戏房间。
 3. **加入游戏**：
-    - 创建房间会自动生成房间号
-    - 输入房间号，点击“加入游戏”按钮，系统会弹出界面让你选择座位。
-    - 系统会自动将您加入当前游戏房间。
-  
+   - 创建房间会自动生成房间号
+   - 输入房间号，点击“加入游戏”按钮，系统会弹出界面让你选择座位。
+   - 系统会自动将您加入当前游戏房间。
 4. **等待其他玩家**：
-    - 其他玩家也需要加入游戏，系统会自动将他们加入当前游戏房间。
-    - 当所有玩家都加入后，游戏开始。
+   - 其他玩家也需要加入游戏，系统会自动将他们加入当前游戏房间。
+   - 当所有玩家都加入后，游戏开始。
 
----
+***
 
 ## ⚠️ 注意事项
 
-- **数据存储**：当前版本为**内存运行模式**。**请勿关闭运行 `main.py` 的终端窗口**，否则当前游戏进度会丢失。
+- **数据存储**：当前版本为**内存运行模式**。**请勿关闭运行** **`main.py`** **的终端窗口**，否则当前游戏进度会丢失。
 - 房间生成以后，游玩身份与座位绑定，退出房间会导致该座位无法使用。
+- 夜间消息推送收游览器影响，如果没有弹窗，可以直接翻阅个人信息历史记录。
 
 ## 🛠️ 技术栈
 
 - **后端**: Python 3.8+ + Flask 2.3.0
 - **前端**: 原生 HTML5/CSS3/JavaScript ES6+（无复杂框架依赖）
-- **渲染引擎**: WebGL 2.0（背景特效）
 - **字体**: Cinzel & Noto Serif SC
 - **版本控制**: Git（线性提交历史，Rebase 工作流）
 
@@ -86,28 +80,22 @@
 
 详见 `requirements.txt`：
 
----
+***
 
 ## 📝 版本更新日志
 
-### v1.0.1 (2026-03-11)
+### v1.0.2 (2026-03-24)
 
 #### ✅ 第一阶段收官
 
 - 完成暗流涌动核心流程的稳定化与回归测试补齐。
 - 新增并通过回归用例，覆盖占卜师红鲱鱼、镇长替死概率、间谍与贞洁者注册通道等关键规则。
 - 镇长替死改为概率触发，并将概率常量统一收敛到 `config/balance.py` 便于后续调参。
-- 路由与服务开始模块化拆分：`routes/` 与 `services/` 已建立并接入首批逻辑。
+- 服务层持续模块化：`services/` 已建立并接入首批逻辑。
 
 #### 🚀 下一阶段
 
 - 进入黯月初升与梦殒春宵的规则落地与架构扩展阶段（排除旅行者与实验性角色）。
 
----
-
-
-
-
-
-
+***
 

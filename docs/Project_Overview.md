@@ -9,7 +9,7 @@
 ## 1. 项目整体概述 (Project Overview)
 
 **项目名称**: `blood_on_the_clocktower_K`  
-**核心目标**: 构建一个《血染钟楼》（Blood on the Clocktower）桌面游戏的**说书人（Storyteller）辅助系统**。  
+**核心目标**: 构建一个《血染钟楼》（Blood on the Clocktower）桌面游戏的**在线玩家系统**。  
 **应用形态**: Web 应用程序（Browser-based Tool）。  
 **当前状态**: 核心功能已完成，处于可运行的原型/MVP（最小可行性产品）阶段。
 
@@ -32,12 +32,12 @@ blood_on_the_clocktower_K/
 ├── main.py                     # [后端核心] Flask 应用入口，API 路由定义，游戏状态管理
 ├── game_data.py                # [数据中心] 包含剧本(TB/BMR/SnV)、角色技能、夜间顺序、阶段定义
 ├── templates/
-│   └── index.html              # [前端入口] 单页应用 (SPA) 结构的 HTML 模板
+│   └── player.html             # [前端入口] 玩家端页面模板（统一入口 /player）
 ├── static/
 │   ├── css/
 │   │   └── style.css           # [样式表] 深色哥特风格 UI，包含响应式布局与动画
 │   └── js/
-│       └── app.js              # [前端逻辑] 负责 UI 渲染、API 交互、弹窗控制、状态同步
+│       └── player.js           # [前端逻辑] 负责玩家端 UI 渲染、API 交互、状态同步
 ├── blood_on_the_clocktower_K_docs_temp_scripts/  # [文档/脚本] 临时归档目录 (已加入 gitignore)
 └── .gitignore                  # [配置] 版本控制忽略规则
 ```
@@ -65,7 +65,7 @@ blood_on_the_clocktower_K/
   - **提名与投票**: 完整的提名验证、投票统计、票数阈值计算。
   - **处决结算**: 自动判定处决结果及游戏结束条件（善/恶胜利）。
 
-### 3.2 前端交互 (`index.html`, `app.js`, `style.css`)
+### 3.2 前端交互 (`player.html`, `player.js`, `style.css`)
 
 - **视觉风格**: 采用暗色调、Cinzel 字体，营造神秘氛围。
 - **座位圆盘**: 动态渲染玩家座位，直观显示状态图标（死亡、中毒、醉酒、技能已用）。
