@@ -10,6 +10,14 @@ class TestPhase1Regression(unittest.TestCase):
         self.client = app.test_client()
         games.clear()
 
+    def _join_player(self, game_id, player_id):
+        join_resp = self.client.post(
+            "/api/player/join_game",
+            json={"game_id": game_id, "player_id": player_id},
+        )
+        self.assertEqual(join_resp.status_code, 200)
+        return join_resp.get_json()["reconnect_token"]
+
     def _create_game_with_manual_roles(self, assignments, player_count=5):
         create_resp = self.client.post(
             "/api/game/create",
@@ -71,9 +79,10 @@ class TestPhase1Regression(unittest.TestCase):
         self.assertEqual(drunk_player.get("role", {}).get("id"), "chef")
         self.assertEqual((drunk_player.get("true_role") or {}).get("id"), "drunk")
         self.client.post(f"/api/game/{game_id}/start_day")
+        reconnect_token = self._join_player(game_id, 1)
         nominate_resp = self.client.post(
             "/api/player/nominate",
-            json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2},
+            json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2, "reconnect_token": reconnect_token},
         )
         nominate_data = nominate_resp.get_json()
         self.assertEqual(nominate_resp.status_code, 200)
@@ -95,9 +104,10 @@ class TestPhase1Regression(unittest.TestCase):
         )
         game = games[game_id]
         self.client.post(f"/api/game/{game_id}/start_day")
+        reconnect_token = self._join_player(game_id, 1)
         nominate_resp = self.client.post(
             "/api/player/nominate",
-            json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2},
+            json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2, "reconnect_token": reconnect_token},
         )
         nominate_data = nominate_resp.get_json()
         self.assertEqual(nominate_resp.status_code, 200)
@@ -398,10 +408,11 @@ class TestPhase1Regression(unittest.TestCase):
         )
         game = games[game_id]
         self.client.post(f"/api/game/{game_id}/start_day")
+        reconnect_token = self._join_player(game_id, 1)
         with patch("main.random.random", return_value=0.0):
             nominate_resp = self.client.post(
                 "/api/player/nominate",
-                json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2},
+                json={"game_id": game_id, "nominator_id": 1, "nominee_id": 2, "reconnect_token": reconnect_token},
             )
         self.assertEqual(nominate_resp.status_code, 200)
         nominate_data = nominate_resp.get_json()
@@ -420,6 +431,7 @@ class TestPhase1Regression(unittest.TestCase):
         )
         game = games[game_id]
         game.exorcist_previous_targets = [2]
+        reconnect_token = self._join_player(game_id, 1)
         resp = self.client.post(
             "/api/player/night_action",
             json={
@@ -428,6 +440,7 @@ class TestPhase1Regression(unittest.TestCase):
                 "targets": [2],
                 "action_type": "exorcist",
                 "extra_data": {},
+                "reconnect_token": reconnect_token,
             },
         )
         self.assertEqual(resp.status_code, 400)
@@ -445,6 +458,7 @@ class TestPhase1Regression(unittest.TestCase):
         )
         game = games[game_id]
         game.devils_advocate_previous_targets = [2]
+        reconnect_token = self._join_player(game_id, 1)
         resp = self.client.post(
             "/api/player/night_action",
             json={
@@ -453,6 +467,7 @@ class TestPhase1Regression(unittest.TestCase):
                 "targets": [2],
                 "action_type": "devils_advocate",
                 "extra_data": {},
+                "reconnect_token": reconnect_token,
             },
         )
         self.assertEqual(resp.status_code, 400)
@@ -709,6 +724,128 @@ class TestPhase1Regression(unittest.TestCase):
         self.client.post(f"/api/game/{game_id}/start_night")
         self.assertIsNone(game.minstrel_effect_until_day)
 
+    def test_bmr_courtier_can_make_demon_drunk_and_block_kill(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "courtier"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 1, "action": "侍臣灌醉", "target": 3, "action_type": "drunk"},
+        )
+        with patch("main.random.random", return_value=0.99):
+            self.client.post(
+                f"/api/game/{game_id}/night_action",
+                json={"player_id": 3, "action": "僵怖击杀", "target": 2, "action_type": "zombuul_kill"},
+            )
+        self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertTrue(next(p for p in game.players if p["id"] == 2).get("alive"))
+        self.assertTrue(next(p for p in game.players if p["id"] == 3).get("drunk"))
+        self.assertTrue(next(p for p in game.players if p["id"] == 1).get("ability_used"))
+
+    def test_bmr_professor_can_revive_dead_player(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "professor"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        dead_player = next(p for p in game.players if p["id"] == 4)
+        dead_player["alive"] = False
+        dead_player["vote_token"] = False
+        self.client.post(f"/api/game/{game_id}/start_night")
+        resp = self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 1, "action": "教授复活", "target": 4, "action_type": "revive"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(dead_player.get("alive"))
+        self.assertTrue(dead_player.get("vote_token"))
+        self.assertTrue(next(p for p in game.players if p["id"] == 1).get("ability_used"))
+
+    def test_bmr_moonchild_day_action_can_kill_same_alignment_target(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "moonchild"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        moonchild = next(p for p in game.players if p["id"] == 1)
+        moonchild["alive"] = False
+        moonchild["moonchild_triggered"] = True
+        game.current_phase = "day"
+        game.pending_moonchild = 1
+
+        reconnect_token = self._join_player(game_id, 1)
+        action_resp = self.client.get(
+            f"/api/player/day_action/{game_id}/1?reconnect_token={reconnect_token}"
+        )
+        self.assertEqual(action_resp.status_code, 200)
+        self.assertTrue(action_resp.get_json().get("has_pending"))
+
+        submit_resp = self.client.post(
+            "/api/player/submit_action",
+            json={"game_id": game_id, "player_id": 1, "targets": [2], "reconnect_token": reconnect_token},
+        )
+        self.assertEqual(submit_resp.status_code, 200)
+        self.assertFalse(next(p for p in game.players if p["id"] == 2).get("alive"))
+        self.assertIsNone(game.pending_moonchild)
+
+    def test_bmr_sailor_cannot_die_from_night_kill_while_sober(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "sailor"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        game = games[game_id]
+        self.client.post(f"/api/game/{game_id}/start_night")
+        self.client.post(
+            f"/api/game/{game_id}/night_action",
+            json={"player_id": 3, "action": "僵怖击杀", "target": 1, "action_type": "zombuul_kill"},
+        )
+        start_day_resp = self.client.post(f"/api/game/{game_id}/start_day")
+        self.assertEqual(start_day_resp.status_code, 200)
+        self.assertTrue(next(p for p in game.players if p["id"] == 1).get("alive"))
+        self.assertFalse(any(d.get("player_id") == 1 for d in start_day_resp.get_json().get("night_deaths", [])))
+
+    def test_bmr_tinker_can_die_on_nomination_roll(self):
+        game_id = self._create_bmr_game_with_manual_roles(
+            [
+                {"name": "1号", "role_id": "tinker"},
+                {"name": "2号", "role_id": "innkeeper"},
+                {"name": "3号", "role_id": "zombuul"},
+                {"name": "4号", "role_id": "gambler"},
+                {"name": "5号", "role_id": "goon"},
+            ]
+        )
+        self.client.post(f"/api/game/{game_id}/start_day")
+        with patch("main.random.random", return_value=0.0):
+            resp = self.client.post(
+                f"/api/game/{game_id}/nominate",
+                json={"nominator_id": 2, "nominee_id": 3},
+            )
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(next(p for p in games[game_id].players if p["id"] == 1).get("alive"))
+
     def test_owner_end_day_when_already_night_should_be_idempotent_success(self):
         game_id = self._create_game_with_manual_roles(
             [
@@ -745,9 +882,10 @@ class TestPhase1Regression(unittest.TestCase):
         game = games[game_id]
         game.owner_token = "owner_test_token"
         self.client.post(f"/api/game/{game_id}/start_day")
+        reconnect_token = self._join_player(game_id, 4)
         nominate_resp = self.client.post(
             "/api/player/nominate",
-            json={"game_id": game_id, "nominator_id": 4, "nominee_id": 1},
+            json={"game_id": game_id, "nominator_id": 4, "nominee_id": 1, "reconnect_token": reconnect_token},
         )
         self.assertEqual(nominate_resp.status_code, 200)
         nomination = game.nominations[-1]

@@ -48,6 +48,26 @@ def _is_reconnect_token_valid(player, token):
         return False
     return True
 
+def _extract_reconnect_token(payload=None):
+    if isinstance(payload, dict):
+        token = payload.get("reconnect_token")
+        if token:
+            return token
+    return (
+        request.args.get("reconnect_token")
+        or request.headers.get("X-Player-Token")
+        or request.headers.get("Authorization")
+    )
+
+def _require_player_auth(game, player_id, payload=None):
+    player = _get_player(game, player_id)
+    if not player:
+        return None, (jsonify({"error": "无效的玩家"}), 400)
+    reconnect_token = _extract_reconnect_token(payload)
+    if not _is_reconnect_token_valid(player, reconnect_token):
+        return None, (jsonify({"error": "玩家凭据无效或已过期，请重新加入房间"}), 401)
+    return player, None
+
 def _get_player(game, player_id):
     return next((p for p in game.players if p["id"] == player_id), None)
 
@@ -114,8 +134,10 @@ def _build_auto_action_config(game, player, role, action_type):
         "use_alive_only": True,
         "description": role.get("ability", "")
     }
-    if action_type in ["kill", "assassin_kill", "poison", "drunk", "sailor_drunk", "grandchild_select", "butler_master", "exorcist", "devils_advocate", "pukka_poison", "zombuul_kill", "ability_select", "gambler_guess"]:
+    if action_type in ["kill", "assassin_kill", "poison", "drunk", "sailor_drunk", "grandchild_select", "butler_master", "exorcist", "devils_advocate", "pukka_poison", "zombuul_kill", "ability_select", "gambler_guess", "revive"]:
         config["can_select"] = True
+        if action_type == "revive":
+            config["target_scope"] = "dead"
     elif action_type == "protect":
         config["can_select"] = True
         if role_id == "innkeeper":
@@ -198,6 +220,11 @@ def _validate_night_action_constraints(game, player, role_id, action_type, targe
         previous_targets = getattr(game, "devils_advocate_previous_targets", []) or []
         if previous_targets and previous_targets[-1] == targets[0]:
             return False, "恶魔代言人不能连续两晚选择同一名玩家"
+    if role_id == "professor" and action_type == "revive":
+        for tid in targets:
+            target_player = _get_player(game, tid)
+            if not target_player or target_player.get("alive", True):
+                return False, "教授只能选择死亡玩家"
     return True, ""
 
 def _create_pending_action(game, player, action_type, action_config):
@@ -215,13 +242,25 @@ def _create_pending_action(game, player, action_type, action_config):
         for p in game.players
         if p["id"] != player_id
     ]
+    dead_players = [
+        {"id": p["id"], "name": p["name"]}
+        for p in game.players
+        if not p.get("alive", True) and p["id"] != player_id
+    ]
     all_players_with_self = [{"id": p["id"], "name": p["name"]} for p in game.players]
 
     role = player.get("role", {})
     role_id = role.get("id", "")
     role_name = role.get("name", "未知角色")
     include_self_roles = ["fortune_teller"]
-    if role_id in include_self_roles and not action_config.get("use_alive_only", True):
+    target_scope = action_config.get("target_scope")
+    if target_scope == "dead":
+        target_list = dead_players
+    elif target_scope == "all":
+        target_list = all_players
+    elif target_scope == "all_with_self":
+        target_list = all_players_with_self
+    elif role_id in include_self_roles and not action_config.get("use_alive_only", True):
         target_list = all_players_with_self
     elif action_config.get("use_alive_only", True):
         target_list = alive_players
@@ -504,16 +543,18 @@ def _end_day_and_start_night(game):
     else:
         game.add_log("[系统] 白天结束：无人被处决", "execution")
 
+    tinker_result = game._roll_tinker_death("白天结束")
     final_game_end = game.check_game_end(apply_scarlet_woman=True, allow_mayor_day_end=True)
     
     if final_game_end.get("ended"):
-        return {"success": True, "execution_result": execution_result, "game_end": final_game_end, "started_night": False}
+        return {"success": True, "execution_result": execution_result, "tinker_result": tinker_result, "game_end": final_game_end, "started_night": False}
 
     game.start_night()
     _start_auto_night_loop(game)
     return {
         "success": True,
         "execution_result": execution_result,
+        "tinker_result": tinker_result,
         "game_end": {"ended": False},
         "started_night": True,
         "night_number": game.night_number
@@ -575,6 +616,57 @@ def _submit_pending_action_choice(game, player, pending, targets, extra_data=Non
             game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 执行了日志查看", "player_action")
         else:
             game.add_log(f"[玩家选择] {player['name']} ({pending['role_name']}) 提交了无目标行动", "player_action")
+
+
+def _create_day_pending_action(game, player, config):
+    if not hasattr(game, 'pending_actions'):
+        game.pending_actions = {}
+    action = {
+        "player_id": player["id"],
+        "player_name": player["name"],
+        "role_id": (player.get("role") or {}).get("id", ""),
+        "role_name": (player.get("role") or {}).get("name", "未知角色"),
+        "action_type": "day_action",
+        "phase": game.current_phase,
+        "config": config,
+        "targets": config.get("targets", []),
+        "min_targets": config.get("min_targets", 1),
+        "max_targets": config.get("max_targets", 1),
+        "unique_targets": config.get("unique_targets", True),
+        "can_skip": config.get("can_skip", False),
+        "description": config.get("description", ""),
+        "created_at": datetime.now().isoformat(),
+        "status": "pending",
+        "choice": None
+    }
+    game.pending_actions[player["id"]] = action
+    return action
+
+
+def _get_or_create_day_action(game, player):
+    pending_actions = getattr(game, 'pending_actions', {})
+    pending = pending_actions.get(player["id"])
+    if pending and pending.get("status") in {"pending", "submitted"} and pending.get("action_type") == "day_action":
+        return pending
+
+    role_id = (player.get("role") or {}).get("id")
+    if role_id == "moonchild" and getattr(game, "pending_moonchild", None) == player["id"]:
+        targets = [
+            {"id": p["id"], "name": p["name"]}
+            for p in game.players
+            if p["id"] != player["id"] and p.get("alive", True)
+        ]
+        return _create_day_pending_action(game, player, {
+            "action_name": "月之子选择",
+            "description": "选择一名玩家。若其与你同阵营，则其死亡。",
+            "targets": targets,
+            "min_targets": 1,
+            "max_targets": 1,
+            "unique_targets": True,
+            "can_skip": False
+        })
+
+    return None
 
 
 # ==================== 页面路由 ====================
@@ -759,13 +851,9 @@ def get_player_game_state(game_id, player_id):
     game = games[game_id]
     if hasattr(game, "reconcile_player_role_types"):
         game.reconcile_player_role_types("状态查询")
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    reconnect_token = request.args.get("reconnect_token")
-    if reconnect_token and not _is_reconnect_token_valid(player, reconnect_token):
-        return jsonify({"error": "重连凭据无效或已过期"}), 401
+    player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
     
     # 更新最后在线时间
     player["last_seen"] = datetime.now().isoformat()
@@ -1010,6 +1098,19 @@ def get_night_action_config(role_id, role_type, game, player_id):
         config["min_targets"] = 1
         config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
         config["description"] = "选择一名玩家并猜测其角色；若猜错则你死亡"
+    elif role_id == "courtier":
+        config["type"] = "drunk"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in alive_players]
+        config["description"] = "每局一次，选择一名玩家，其醉酒 3 天 3 夜"
+    elif role_id == "professor":
+        config["type"] = "revive"
+        config["can_select"] = True
+        config["min_targets"] = 1
+        config["use_alive_only"] = False
+        config["targets"] = [{"id": p["id"], "name": p["name"]} for p in game.players if not p.get("alive", True)]
+        config["description"] = "每局一次，选择一名死亡玩家使其复活"
     
     elif role_id in ["washerwoman", "librarian", "investigator", "chef", "clockmaker"]:
         config["type"] = "info"
@@ -1039,10 +1140,9 @@ def player_night_action():
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
 
     role = player.get("true_role") if player.get("is_the_drunk") and player.get("true_role") else player.get("role", {})
     role_id = role.get("id", "")
@@ -1121,6 +1221,9 @@ def player_nominate():
         return jsonify({"error": "游戏不存在"}), 404
 
     game = games[game_id]
+    player, auth_error = _require_player_auth(game, nominator_id, data)
+    if auth_error:
+        return auth_error
     if game.current_phase != "day":
         return jsonify({"error": "当前不是白天，不能提名"}), 400
 
@@ -1183,10 +1286,9 @@ def player_vote():
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
 
     nomination = next((n for n in game.nominations if n["id"] == nomination_id), None)
     if not nomination:
@@ -1291,6 +1393,7 @@ def end_day_by_owner():
 
     return jsonify(result)
 
+
 @player_bp.route('/api/player/use_ability', methods=['POST'])
 def player_use_ability():
     """玩家通用技能入口"""
@@ -1321,9 +1424,9 @@ def player_use_ability():
         return jsonify({"error": "游戏不存在"}), 404
 
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
 
     if game.current_phase == "night":
         pending = getattr(game, 'pending_actions', {}).get(player_id)
@@ -1374,10 +1477,9 @@ def get_player_messages(game_id, player_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
     
     messages = player.get("messages", [])
     
@@ -1397,10 +1499,9 @@ def mark_messages_read(game_id, player_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
     
     messages = player.get("messages", [])
     for msg in messages:
@@ -1424,12 +1525,9 @@ def player_heartbeat():
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    if reconnect_token and not _is_reconnect_token_valid(player, reconnect_token):
-        return jsonify({"error": "重连凭据无效或已过期"}), 401
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
     
     player["connected"] = True
     player["last_seen"] = datetime.now().isoformat()
@@ -1444,10 +1542,9 @@ def get_pending_action(game_id, player_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
     
     pending_actions = getattr(game, 'pending_actions', {})
     pending = pending_actions.get(player_id)
@@ -1481,10 +1578,9 @@ def submit_player_action():
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-    
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
     
     pending_actions = getattr(game, 'pending_actions', {})
     pending = pending_actions.get(player_id)
@@ -1506,6 +1602,18 @@ def submit_player_action():
         if not ok:
             return jsonify({"error": err}), 400
     _submit_pending_action_choice(game, player, pending, normalized_targets, extra_data, skipped)
+
+    if pending.get("action_type") == "day_action":
+        result = game.resolve_day_action(player_id, normalized_targets, skipped)
+        if not result.get("success"):
+            pending["status"] = "pending"
+            pending["choice"] = None
+            return jsonify({"error": result.get("error", "白天行动处理失败")}), 400
+        return jsonify({
+            "success": True,
+            "message": result.get("message", "选择已提交"),
+            "day_action_result": result
+        })
     
     return jsonify({
         "success": True,
@@ -1522,10 +1630,9 @@ def get_ravenkeeper_status(game_id, player_id):
         return jsonify({"error": "游戏不存在"}), 404
 
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
-
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
+    player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
 
     # 检查是否是守鸦人且已被触发
     is_ravenkeeper = (player.get("role") and player["role"].get("id") == "ravenkeeper")
@@ -1566,10 +1673,12 @@ def ravenkeeper_choose():
         return jsonify({"error": "游戏不存在"}), 404
 
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
     target = next((p for p in game.players if p["id"] == target_id), None)
 
-    if not player or not target:
+    if not target:
         return jsonify({"error": "无效的玩家"}), 400
 
     if not player.get("ravenkeeper_triggered"):
@@ -1654,13 +1763,11 @@ def get_day_action(game_id, player_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
+    player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
     
-    if not player:
-        return jsonify({"error": "无效的玩家"}), 400
-    
-    pending_actions = getattr(game, 'pending_actions', {})
-    pending = pending_actions.get(player_id)
+    pending = _get_or_create_day_action(game, player)
     
     if pending and pending.get("status") == "pending" and pending.get("action_type") == "day_action":
         return jsonify({
@@ -1680,6 +1787,14 @@ def get_pit_hag_all_roles(game_id):
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
+    player_id = request.args.get("player_id")
+    try:
+        player_id = int(player_id)
+    except (TypeError, ValueError):
+        return jsonify({"error": "无效的玩家"}), 400
+    _player, auth_error = _require_player_auth(game, player_id)
+    if auth_error:
+        return auth_error
     
     # 获取当前场上的角色
     current_role_ids = set()
@@ -1718,10 +1833,12 @@ def submit_pit_hag_action():
         return jsonify({"error": "游戏不存在"}), 404
     
     game = games[game_id]
-    player = next((p for p in game.players if p["id"] == player_id), None)
+    player, auth_error = _require_player_auth(game, player_id, data)
+    if auth_error:
+        return auth_error
     target = next((p for p in game.players if p["id"] == target_player_id), None)
     
-    if not player or not target:
+    if not target:
         return jsonify({"error": "无效的玩家"}), 400
     
     # 检查角色是否在场

@@ -60,6 +60,9 @@ def create_game():
     if script_id not in SCRIPTS:
         return jsonify({"error": "无效的剧本"}), 400
 
+    if script_id == 'sects_and_violets':
+        return jsonify({"error": "梦殒春宵仍在建设中，当前版本暂不开放创建"}), 400
+
     if not 5 <= player_count <= 16:
         return jsonify({"error": "玩家数量必须在5-16之间"}), 400
 
@@ -284,6 +287,40 @@ def execute(game_id):
         result["game_end"] = game.check_game_end(apply_scarlet_woman=True)
 
     return jsonify(result)
+
+
+@game_routes_bp.route('/api/game/<game_id>/generate_info', methods=['POST'])
+def generate_info(game_id):
+    """Deprecated compatibility route for old tests/UI; keep logic in the main game/player flow."""
+    if game_id not in games:
+        return jsonify({"error": "游戏不存在"}), 404
+
+    data = request.json
+    game = games[game_id]
+    player_id = data.get('player_id')
+    info_type = data.get('info_type')
+    targets = data.get('targets')
+    info = game.generate_info(player_id, info_type, targets)
+
+    if info is None:
+        return jsonify({"error": "无法生成信息"}), 400
+    if isinstance(info, dict) and info_type:
+        info.setdefault("info_type", info_type)
+    return jsonify(info)
+
+
+@game_routes_bp.route('/api/game/<game_id>/slayer_ability', methods=['POST'])
+def slayer_ability(game_id):
+    """Deprecated compatibility route for old tests/UI; keep logic in the main game/player flow."""
+    if game_id not in games:
+        return jsonify({"error": "游戏不存在"}), 404
+
+    data = request.json
+    game = games[game_id]
+    result = game.declare_slayer_shot(data.get('slayer_id'), data.get('target_id'))
+
+    status_code = 200 if result.get("success") else 400
+    return jsonify(result), status_code
 
 
 @game_routes_bp.route('/api/game/<game_id>/player_status', methods=['POST'])

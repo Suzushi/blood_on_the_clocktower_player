@@ -17,7 +17,8 @@ from config.balance import (
     RECLUSE_INVESTIGATOR_MINION_REGISTRATION_RATE,
     RECLUSE_EMPATH_EVIL_REGISTRATION_RATE,
     RECLUSE_FORTUNE_TELLER_DEMON_REGISTRATION_RATE,
-    RECLUSE_SLAYER_DEMON_REGISTRATION_RATE
+    RECLUSE_SLAYER_DEMON_REGISTRATION_RATE,
+    TINKER_DEATH_CHANCE
 )
 from services.info_generators import (
     generate_chef_info,
@@ -826,6 +827,15 @@ class Game:
                     "night": self.night_number + duration
                 }
                 self.add_log(f"[夜间] {player['name']} 使 {target_player['name']} 醉酒 {duration} 天", "night")
+
+        elif action_type == "revive" and target:
+            if target_player and not target_player.get("alive", True):
+                target_player["alive"] = True
+                target_player["vote_token"] = True
+                target_player["appears_dead"] = False
+                self.add_log(f"[夜间] {player['name']} 复活了 {target_player['name']}", "night")
+            elif target_player:
+                self.add_log(f"[夜间] {player['name']} 试图复活 {target_player['name']}，但目标并未死亡", "night")
         
         # 处理水手的特殊醉酒（水手和目标中一人醉酒）
         elif action_type == "sailor_drunk" and target:
@@ -990,6 +1000,8 @@ class Game:
             if role_id in once_per_game_roles:
                 player["ability_used"] = True
                 self.add_log(f"[系统] {player['name']} 的一次性技能已使用", "info")
+
+        self._roll_tinker_death(f"夜间行动:{action_type or action or 'unknown'}")
     
     # 更新日期: 2026-01-02 - 添加小恶魔传刀功能
     def process_imp_suicide(self, imp_player_id):
@@ -1140,6 +1152,9 @@ class Game:
                 if self._is_ability_active(target_player, "被动技能:soldier"):
                     self.add_log(f"{target_player['name']} 是士兵，免疫了恶魔的击杀", "night")
                     continue
+
+            if self._is_protected_by_sailor(target_player, "被动技能:sailor"):
+                continue
             
             # 更新日期: 2026-01-05 - 茶艺师保护检查
             # 检查目标是否被茶艺师保护（茶艺师存活的邻居且两邻居都是善良的）
@@ -1264,6 +1279,46 @@ class Game:
             })
             self.add_log(f"[夜间] {player['name']} 将于夜晚死亡，原因：{cause}", "night")
             self.add_system_log(f"第{self.night_number}夜 死亡登记: {self._player_label(player)}，原因: {cause}", "death_register")
+
+    def _is_protected_by_sailor(self, player, scene=""):
+        if not player or (player.get("role") or {}).get("id") != "sailor":
+            return False
+        if self._is_ability_active(player, scene or "被动技能:sailor"):
+            self.add_log(f"⚓ {player['name']} 因水手能力无法死亡", "game_event")
+            return True
+        return False
+
+    def _roll_tinker_death(self, trigger=""):
+        tinker = next(
+            (p for p in self.players if p.get("alive", True) and (p.get("role") or {}).get("id") == "tinker"),
+            None
+        )
+        if not tinker:
+            return {"triggered": False}
+        if any(d.get("player_id") == tinker["id"] for d in self.night_deaths):
+            return {"triggered": False}
+        if not self._is_ability_active(tinker, "被动技能:tinker"):
+            return {"triggered": False}
+
+        rolled = random.random()
+        if rolled >= TINKER_DEATH_CHANCE:
+            self.add_log(f"[系统] 修补匠 {tinker['name']} 存活判定通过（{trigger or '流程'}）", "info")
+            return {"triggered": False, "rolled": rolled}
+
+        cause = "修补匠意外死亡"
+        if self.current_phase == "night":
+            self.night_deaths.append({
+                "player_id": tinker["id"],
+                "player_name": tinker["name"],
+                "cause": cause
+            })
+            self.add_log(f"🔧 修补匠 {tinker['name']} 在夜间判定死亡（{trigger or '流程'}）", "game_event")
+            return {"triggered": True, "player_id": tinker["id"], "player_name": tinker["name"], "pending_until_day": True, "rolled": rolled}
+
+        tinker["alive"] = False
+        tinker["vote_token"] = False
+        self.add_log(f"🔧 修补匠 {tinker['name']} 判定死亡（{trigger or '流程'}）", "game_event")
+        return {"triggered": True, "player_id": tinker["id"], "player_name": tinker["name"], "pending_until_day": False, "rolled": rolled}
     
     def start_day(self):
         """开始白天"""
@@ -1360,6 +1415,7 @@ class Game:
         nominee_role = nominee.get('role', {})
         nominee_role_name = nominee_role.get('name', '未知') if nominee_role else '未知'
         self.add_system_log(f"第{self.day_number}天，玩家{nominator_id}({nominator['name']}-{nominator_role_name})提名了玩家{nominee_id}({nominee['name']}-{nominee_role_name})", "nomination")
+        self._roll_tinker_death("白天提名")
         
         # 检查贞洁者能力触发
         virgin_triggered = False
@@ -1549,6 +1605,15 @@ class Game:
                     "fool_saved": True,
                     "player": nominee
                 }
+
+            if self._is_protected_by_sailor(nominee, "被动技能:sailor"):
+                nomination["status"] = "sailor_saved"
+                return {
+                    "success": True,
+                    "executed": False,
+                    "sailor_saved": True,
+                    "player": nominee
+                }
             
             # 记录被处决者的角色类型（用于后续检查红唇女郎）
             was_demon = nominee.get("role_type") == "demon"
@@ -1729,6 +1794,58 @@ class Game:
             "target_died": False,
             "public_message": f"{player['name']} 对 {target['name']} 发动技能，无事发生"
         }
+
+    def resolve_day_action(self, player_id, targets, skipped=False):
+        player = next((p for p in self.players if p["id"] == player_id), None)
+        if not player:
+            return {"success": False, "error": "无效的玩家"}
+        role_id = (player.get("role") or {}).get("id")
+        if self.current_phase != "day":
+            return {"success": False, "error": "当前不是白天"}
+        if role_id == "moonchild":
+            return self.resolve_moonchild_choice(player_id, targets, skipped)
+        return {"success": False, "error": "当前没有可处理的白天行动"}
+
+    def resolve_moonchild_choice(self, player_id, targets, skipped=False):
+        if self.pending_moonchild != player_id:
+            return {"success": False, "error": "月之子未被触发"}
+        player = next((p for p in self.players if p["id"] == player_id), None)
+        if not player:
+            return {"success": False, "error": "无效的玩家"}
+        if skipped or not targets:
+            return {"success": False, "error": "月之子必须选择一名玩家"}
+        target_id = targets[0]
+        if target_id == player_id:
+            return {"success": False, "error": "月之子不能选择自己"}
+        target = next((p for p in self.players if p["id"] == target_id), None)
+        if not target or not target.get("alive", True):
+            return {"success": False, "error": "目标玩家无效"}
+
+        player_is_evil = self._is_player_evil_for_win(player)
+        target_is_evil = self._is_player_evil_for_win(target)
+        same_alignment = player_is_evil == target_is_evil
+        target_died = False
+
+        if same_alignment:
+            target["alive"] = False
+            target["vote_token"] = False
+            target_died = True
+            self.add_log(f"🌙 月之子 {player['name']} 选择了 {target['name']}，目标因同阵营而死亡", "game_event")
+        else:
+            self.add_log(f"🌙 月之子 {player['name']} 选择了 {target['name']}，因不同阵营未造成死亡", "game_event")
+
+        self.pending_moonchild = None
+        player["moonchild_choice_made"] = True
+        player["moonchild_target_id"] = target_id
+
+        return {
+            "success": True,
+            "target_id": target_id,
+            "target_name": target["name"],
+            "same_alignment": same_alignment,
+            "target_died": target_died,
+            "message": f"月之子已选择 {target['name']}"
+        }
     
     def _alive_players_for_win_check(self):
         alive_players = [p for p in self.players if p["alive"]]
@@ -1766,6 +1883,8 @@ class Game:
             return False
         if not self._is_ability_active(mastermind, "被动技能:mastermind"):
             return False
+        # 撤销“恶魔已被消灭”的即时终局快照，改由主谋延长日接管结算。
+        self.game_end_snapshot = None
         self.mastermind_pending = True
         self.mastermind_resolution_day = self.day_number + 1
         self.add_log(f"🧠 主谋 {mastermind['name']} 触发：游戏延长到第 {self.mastermind_resolution_day} 天", "game_event")
@@ -2015,7 +2134,8 @@ class Game:
             real_role_name = (target_player.get("role") or {}).get("name", "未知")
         role_id = (target_player.get("role") or {}).get("id")
         if role_id == "recluse" and scene in {"殡仪员", "送葬者", "undertaker"}:
-            if self._is_ability_active(target_player, "被动技能:recluse_undertaker") and random.random() < RECLUSE_UNDERTAKER_IMP_REGISTRATION_RATE:
+            recluse_can_register = not target_player.get("drunk") and not target_player.get("poisoned")
+            if recluse_can_register and random.random() < RECLUSE_UNDERTAKER_IMP_REGISTRATION_RATE:
                 self.add_log(f"[系统提示] 陌客 {target_player['name']} 在{scene}信息中被注册为小恶魔", "info")
                 return "小恶魔"
         if (target_player.get("role") or {}).get("id") == "spy" and self._spy_registers_as_good_for_info(target_player, scene):

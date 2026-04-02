@@ -41,19 +41,42 @@ const playerState = {
 };
 
 const OWNER_DRAFT_KEY = 'ownerDraftState';
+const PLAYER_TOKEN_EXCLUDED_PATHS = new Set([
+    '/api/player/find_game',
+    '/api/player/join_game',
+    '/api/player/reconnect'
+]);
 
 // ==================== API 调用 ====================
+function shouldAttachPlayerToken(endpoint) {
+    if (!endpoint || !endpoint.startsWith('/api/player')) return false;
+    for (const prefix of PLAYER_TOKEN_EXCLUDED_PATHS) {
+        if (endpoint.startsWith(prefix)) return false;
+    }
+    return !!playerState.reconnectToken;
+}
+
 async function apiCall(endpoint, method = 'GET', data = null) {
+    let finalEndpoint = endpoint;
+    let payload = data && typeof data === 'object' ? { ...data } : data;
+    if (shouldAttachPlayerToken(endpoint)) {
+        if (method === 'GET') {
+            const separator = finalEndpoint.includes('?') ? '&' : '?';
+            finalEndpoint = `${finalEndpoint}${separator}reconnect_token=${encodeURIComponent(playerState.reconnectToken)}`;
+        } else if (payload && typeof payload === 'object' && !Array.isArray(payload) && !payload.reconnect_token) {
+            payload.reconnect_token = playerState.reconnectToken;
+        }
+    }
     const options = {
         method,
         headers: { 'Content-Type': 'application/json' }
     };
-    if (data) {
-        options.body = JSON.stringify(data);
+    if (payload) {
+        options.body = JSON.stringify(payload);
     }
     
     try {
-        const response = await fetch(endpoint, options);
+        const response = await fetch(finalEndpoint, options);
         const result = await response.json();
         updateConnectionStatus(true);
         return result;
@@ -539,9 +562,8 @@ function startHeartbeat() {
 
 async function pollGameState() {
     if (!playerState.gameId || !playerState.playerId) return;
-    
-    const token = playerState.reconnectToken ? `?reconnect_token=${encodeURIComponent(playerState.reconnectToken)}` : '';
-    const result = await apiCall(`/api/player/game_state/${playerState.gameId}/${playerState.playerId}${token}`);
+
+    const result = await apiCall(`/api/player/game_state/${playerState.gameId}/${playerState.playerId}`);
     
     if (result.error) {
         console.error('获取游戏状态失败:', result.error);
@@ -1332,6 +1354,8 @@ async function forceExecuteActiveNomination() {
             showToast(`${execRes.player.name} 被处决`);
         } else if (execRes.protected_by_devils_advocate) {
             showToast(`🛡️ ${execRes.player.name} 被恶魔代言人保护`);
+        } else if (execRes.sailor_saved) {
+            showToast(`⚓ ${execRes.player.name} 因水手能力未死亡`);
         } else if (execRes.fool_saved) {
             showToast(`🃏 ${execRes.player.name} (弄臣) 首次死亡被避免`);
         } else if (execRes.pacifist_intervention) {
@@ -1726,7 +1750,7 @@ async function showPitHagAction(action) {
     document.getElementById('nightActionTitle').textContent = '🧙‍♀️ 麻脸巫婆的回合';
     
     // 获取所有可选角色
-    const rolesResult = await apiCall(`/api/player/pit_hag_roles/${playerState.gameId}`);
+    const rolesResult = await apiCall(`/api/player/pit_hag_roles/${playerState.gameId}?player_id=${encodeURIComponent(playerState.playerId)}`);
     pitHagRoles = rolesResult.roles || [];
     const currentRoleIds = rolesResult.current_role_ids || [];
     

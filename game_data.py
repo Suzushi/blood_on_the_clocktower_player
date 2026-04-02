@@ -686,6 +686,8 @@ def get_night_action_type(role_id, role_type=None):
         return "poison"
     if role_id in ["courtier"]:
         return "drunk"
+    if role_id == "professor":
+        return "revive"
     if role_id == "gambler":
         return "gambler_guess"
     if role_id == "sailor":
